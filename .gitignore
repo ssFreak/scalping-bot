@@ -1,0 +1,9 @@
+__pycache__
+core\__pycache__
+strategies\__pycache__
+bot.log
+ema_crossover_strategy.py
+ema_rsi_strategy.py
+linear_regression_strategy.py
+rmi_trend_sync_strategy.py
+trading_log.txt
