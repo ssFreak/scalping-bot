@@ -1,10 +1,12 @@
 import MetaTrader5 as mt5
 import datetime
+from core.utils import is_forex_market_open
 
 class RiskManager:
-    def __init__(self, config, logger):
+    def __init__(self, config, logger, trade_manager):
         self.config = config
         self.logger = logger
+        self.trade_manager = trade_manager
 
         # parametri din YAML
         self.max_daily_loss = config.get("max_daily_loss", 100)  # în valută cont
@@ -111,3 +113,9 @@ class RiskManager:
             return False
 
         return True
+        
+    def can_trade(self):
+        """Returnează True dacă bot-ul ar trebui să faca trading acum."""
+        total_profit = self.trade_manager.get_today_total_profit()
+        is_market_open = is_forex_market_open()
+        return is_market_open and (total_profit > self.max_daily_loss) and (total_profit < self.max_daily_profit)

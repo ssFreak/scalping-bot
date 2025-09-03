@@ -189,6 +189,4 @@ class TradeManager:
                     # ignorăm eventuale câmpuri neașteptate
                     continue
 
-        # log pentru debugging
-        self.logger.log(f"[DEBUG] Calcul profit zilnic (TradeManager): {total_profit:.2f} (interval UTC {start_utc} - {end_utc})")
         return total_profit

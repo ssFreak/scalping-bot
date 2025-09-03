@@ -10,13 +10,14 @@ from strategies.momentum_strategy import MomentumStrategy
 from core.risk_manager import RiskManager
 from core.trade_manager import TradeManager
 from core.logger import Logger
+from core.utils import is_forex_market_open
 
 # === Setup logging ===
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("bot.log"),
+        logging.FileHandler("bot.log", encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -28,10 +29,10 @@ class BotManager:
         self.config = self.load_config(config_path)
         self.symbols = self.config["general"]["symbols_forex"]
         self.logger = Logger()
-
-        # Risk Manager
-        self.risk_manager = RiskManager(self.config["general"], logger=self.logger)
+        # Trade Manager
         self.trade_manager = TradeManager(logger=self.logger, magic_number=13930, trade_deviation=10, bot_manager=self)
+        # Risk Manager
+        self.risk_manager = RiskManager(self.config["general"], logger=self.logger, trade_manager=self.trade_manager)
 
         # Strategii active
         self.strategies = []
@@ -45,24 +46,59 @@ class BotManager:
 
     def _load_strategies(self):
         cfg = self.config["strategies"]
-
-        if cfg.get("pivot", {}).get("enabled", False):
-            self.strategies.append(PivotStrategy(cfg["pivot"], risk_manager=self.risk_manager, tra))
-
-        if cfg.get("moving_average_ribbon", {}).get("enabled", False):
-            self.strategies.append(MARibbonStrategy(cfg["moving_average_ribbon"], self.risk_manager))
-
-        if cfg.get("momentum_scalping", {}).get("enabled", False):
-            self.strategies.append(MomentumScalpingStrategy(cfg["momentum_scalping"], self.risk_manager))
-
-        logger.info(f"Strategii încărcate: {[s.__class__.__name__ for s in self.strategies]}")
+    
+        for symbol in self.symbols:
+            if cfg.get("pivot", {}).get("enabled", False):
+                self.strategies.append(PivotStrategy(
+                    symbol,
+                    cfg["pivot"],
+                    self.logger,
+                    self.risk_manager,
+                    self.trade_manager,
+                    self
+                ))
+    
+            if cfg.get("moving_average_ribbon", {}).get("enabled", False):
+                self.strategies.append(MARibbonStrategy(
+                    symbol,
+                    cfg["moving_average_ribbon"],
+                    self.logger,
+                    self.risk_manager,
+                    self.trade_manager,
+                    self
+                ))
+    
+            if cfg.get("momentum_scalping", {}).get("enabled", False):
+                self.strategies.append(MomentumStrategy(
+                    symbol,
+                    cfg["momentum_scalping"],
+                    self.logger,
+                    self.risk_manager,
+                    self.trade_manager,
+                    self
+                ))
+    
+        self.logger.log(f"Strategiile au fost încărcate.")
 
     def run(self):
         logger.info("Bot pornit...")
 
         while True:
             if not self.risk_manager.can_trade():
-                logger.warning("🚫 Max daily loss atins - botul continuă să ruleze fără a mai deschide ordine.")
+                total_profit = self.trade_manager.get_today_total_profit()
+                is_market_open = is_forex_market_open()
+                if not is_market_open:
+                    logger.warning("⏸ Piața Forex este închisă, botul nu poate deschide ordine.")
+                elif total_profit <= self.risk_manager.max_daily_loss:
+                    logger.warning(
+                        f"🚫 Max daily loss atins ({total_profit:.2f} <= {self.risk_manager.max_daily_loss:.2f}) - botul continuă să ruleze fără a mai deschide ordine."
+                    )
+                elif total_profit >= self.risk_manager.max_daily_profit:
+                    logger.warning(
+                        f"🎯 Daily profit target atins ({total_profit:.2f} >= {self.risk_manager.max_daily_profit:.2f}) - botul continuă să ruleze fără a mai deschide ordine."
+                    )
+                else:
+                    logger.warning("❓ Botul nu poate deschide ordine dintr-un motiv necunoscut.")
                 time.sleep(60)
                 continue
 
