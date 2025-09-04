@@ -115,8 +115,32 @@ class RiskManager:
 
         return True
         
-    def can_trade(self):
+    def can_trade(self, verbose=False):
         """Returnează True dacă bot-ul ar trebui să faca trading acum."""
         total_profit = self.trade_manager.get_today_total_profit()
         is_market_open = is_forex_market_open()
-        return is_market_open and (total_profit > self.max_daily_loss) and (total_profit < self.max_daily_profit)
+        
+        # Detailed logging for troubleshooting
+        if verbose:
+            self.logger.log(f"🔍 [can_trade] Market open: {is_market_open}")
+            self.logger.log(f"🔍 [can_trade] Today's total profit: {total_profit:.2f}")
+            self.logger.log(f"🔍 [can_trade] Max daily loss limit: {self.max_daily_loss}")
+            self.logger.log(f"🔍 [can_trade] Max daily profit limit: {self.max_daily_profit}")
+            self.logger.log(f"🔍 [can_trade] Profit > max_daily_loss: {total_profit > self.max_daily_loss}")
+            self.logger.log(f"🔍 [can_trade] Profit < max_daily_profit: {total_profit < self.max_daily_profit}")
+        
+        can_trade_result = is_market_open and (total_profit > self.max_daily_loss) and (total_profit < self.max_daily_profit)
+        
+        if verbose:
+            self.logger.log(f"🔍 [can_trade] Final result: {can_trade_result}")
+            if not can_trade_result:
+                reasons = []
+                if not is_market_open:
+                    reasons.append("Market closed")
+                if total_profit <= self.max_daily_loss:
+                    reasons.append(f"Daily loss limit reached ({total_profit:.2f} <= {self.max_daily_loss})")
+                if total_profit >= self.max_daily_profit:
+                    reasons.append(f"Daily profit target reached ({total_profit:.2f} >= {self.max_daily_profit})")
+                self.logger.log(f"🔍 [can_trade] Blocking reasons: {', '.join(reasons)}")
+        
+        return can_trade_result

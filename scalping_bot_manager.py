@@ -46,8 +46,13 @@ class BotManager:
 
     def _load_strategies(self):
         cfg = self.config["strategies"]
+        strategy_count = 0
+        
+        self.logger.log(f"🔄 Loading strategies for symbols: {self.symbols}")
     
         for symbol in self.symbols:
+            symbol_strategies = []
+            
             if cfg.get("pivot", {}).get("enabled", False):
                 self.strategies.append(PivotStrategy(
                     symbol,
@@ -57,6 +62,8 @@ class BotManager:
                     self.trade_manager,
                     self
                 ))
+                symbol_strategies.append("PivotStrategy")
+                strategy_count += 1
     
             if cfg.get("moving_average_ribbon", {}).get("enabled", False):
                 self.strategies.append(MARibbonStrategy(
@@ -67,6 +74,8 @@ class BotManager:
                     self.trade_manager,
                     self
                 ))
+                symbol_strategies.append("MARibbonStrategy")
+                strategy_count += 1
     
             if cfg.get("momentum_scalping", {}).get("enabled", False):
                 self.strategies.append(MomentumStrategy(
@@ -77,16 +86,48 @@ class BotManager:
                     self.trade_manager,
                     self
                 ))
+                symbol_strategies.append("MomentumStrategy")
+                strategy_count += 1
+            
+            self.logger.log(f"📈 {symbol}: Loaded {len(symbol_strategies)} strategies: {', '.join(symbol_strategies)}")
     
-        self.logger.log(f"Strategiile au fost încărcate.")
+        self.logger.log(f"✅ Total strategies loaded: {strategy_count} ({len(self.strategies)} strategy instances)")
+        
+        # Log strategy configuration status
+        enabled_strategies = []
+        for strategy_name, strategy_config in cfg.items():
+            if isinstance(strategy_config, dict) and strategy_config.get("enabled", False):
+                enabled_strategies.append(strategy_name)
+        
+        self.logger.log(f"⚙️ Enabled strategy types in config: {', '.join(enabled_strategies) if enabled_strategies else 'None'}")
 
     def run(self):
         logger.info("Bot pornit...")
+        cycle_count = 0
 
         while True:
-            if not self.risk_manager.can_trade():
+            cycle_count += 1
+            logger.info(f"🔄 === Cycle {cycle_count} Start ===")
+            
+            # Detailed logging of loaded strategies
+            strategy_summary = {}
+            for strategy in self.strategies:
+                strategy_name = strategy.__class__.__name__
+                strategy_symbol = getattr(strategy, 'symbol', 'Unknown')
+                if strategy_name not in strategy_summary:
+                    strategy_summary[strategy_name] = []
+                strategy_summary[strategy_name].append(strategy_symbol)
+            
+            logger.info(f"📊 Loaded strategies: {dict(strategy_summary)}")
+            logger.info(f"🎯 Target symbols: {self.symbols}")
+            
+            # Check can_trade with detailed logging
+            can_trade_status = self.risk_manager.can_trade(verbose=True)
+            
+            if not can_trade_status:
                 total_profit = self.trade_manager.get_today_total_profit()
                 is_market_open = is_forex_market_open()
+                logger.warning(f"⛔ Trading blocked - can_trade() returned False")
                 if not is_market_open:
                     logger.warning("⏸ Piața Forex este închisă, botul nu poate deschide ordine.")
                 elif total_profit <= self.risk_manager.max_daily_loss:
@@ -99,16 +140,44 @@ class BotManager:
                     )
                 else:
                     logger.warning("❓ Botul nu poate deschide ordine dintr-un motiv necunoscut.")
+                logger.info(f"⏳ Waiting 60 seconds before next cycle...")
                 time.sleep(60)
                 continue
 
+            # Strategy execution with detailed logging
+            logger.info(f"✅ Trading allowed - executing strategies for {len(self.symbols)} symbols")
+            execution_summary = []
+            
             for symbol in self.symbols:
+                symbol_strategies = [s for s in self.strategies if getattr(s, 'symbol', None) == symbol]
+                logger.info(f"🔧 Processing symbol {symbol} with {len(symbol_strategies)} strategies: {[s.__class__.__name__ for s in symbol_strategies]}")
+                
                 for strategy in self.strategies:
+                    strategy_name = strategy.__class__.__name__
+                    strategy_symbol = getattr(strategy, 'symbol', 'Unknown')
+                    
                     try:
+                        logger.info(f"▶️ Calling {strategy_name}.run({symbol}) (strategy configured for {strategy_symbol})")
+                        
+                        # Check if this strategy has infinite loop behavior
+                        import inspect
+                        strategy_run_source = inspect.getsource(strategy.run)
+                        has_while_loop = "while True" in strategy_run_source
+                        
+                        if has_while_loop:
+                            logger.warning(f"⚠️ {strategy_name} contains 'while True' loop - may block other strategies!")
+                        
                         strategy.run(symbol)
+                        execution_summary.append(f"{strategy_name}({symbol}): ✅")
+                        logger.info(f"✅ {strategy_name}.run({symbol}) returned normally")
                     except Exception as e:
-                        logger.error(f"Eroare la strategia {strategy.__class__.__name__} pentru {symbol}: {e}")
+                        execution_summary.append(f"{strategy_name}({symbol}): ❌ {str(e)[:50]}")
+                        logger.error(f"❌ Eroare la strategia {strategy_name} pentru {symbol}: {e}")
+                        logger.error(f"🔍 Strategy {strategy_name} failed, continuing with next strategy...")
 
+            # Cycle summary
+            logger.info(f"📋 Cycle {cycle_count} Summary: {'; '.join(execution_summary)}")
+            logger.info(f"⏳ Cycle {cycle_count} complete - waiting 5 seconds...")
             time.sleep(5)  # Delay între cicluri
 
 # === MAIN ===
