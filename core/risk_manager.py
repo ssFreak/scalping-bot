@@ -9,9 +9,10 @@ class RiskManager:
         self.trade_manager = trade_manager
 
         # parametri din YAML
-        self.max_daily_loss = config.get("max_daily_loss", 100)  # în valută cont
+        self.max_daily_loss = config.get("daily_loss", -100)  # în valută cont
         self.risk_per_trade = config.get("risk_per_trade", 0.01)  # % din equity
         self.max_equity_risk = config.get("max_equity_risk", 0.1)  # max 10% din equity per simbol
+        self.max_daily_profit = config.get("daily_profit", 500)
 
         # track pierdere zilnică
         self.daily_loss = 0.0
