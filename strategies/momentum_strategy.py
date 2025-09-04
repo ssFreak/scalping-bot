@@ -59,45 +59,60 @@ class MomentumStrategy(BaseStrategy):
         return None
 
     def run(self, symbol=None):
+        """Unified interface method that calls run_once() - maintained for backward compatibility."""
         # Use the provided symbol parameter or fall back to self.symbol for backward compatibility
-        active_symbol = symbol if symbol is not None else self.symbol
-        self.logger.log(f"▶️ Starting MomentumStrategy for {active_symbol}")
-        while True and self.risk_manager.can_trade():
+        if symbol is not None:
+            # Temporarily use the provided symbol for this run
+            original_symbol = self.symbol
+            self.symbol = symbol
             try:
-                rates = mt5.copy_rates_from_pos(
-                    active_symbol, self.timeframe, 0, max(self.macd_slow, self.rsi_period, self.atr_period) + 5
-                )
-                if rates is None or len(rates) < max(self.macd_slow, self.rsi_period):
-                    time.sleep(5)
-                    continue
+                self.run_once()
+            finally:
+                # Restore original symbol
+                self.symbol = original_symbol
+        else:
+            # Use default behavior with self.symbol
+            self.run_once()
 
-                df = pd.DataFrame(rates)
-                df = calculate_atr(df, self.atr_period)
-                atr = float(df["atr"].iloc[-1])
+    def run_once(self, symbol=None):
+        """Execută o singură iterație de strategie - thread-safe version."""
+        active_symbol = symbol if symbol is not None else self.symbol
+        
+        try:
+            rates = mt5.copy_rates_from_pos(
+                active_symbol, self.timeframe, 0, max(self.macd_slow, self.rsi_period, self.atr_period) + 5
+            )
+            if rates is None or len(rates) < max(self.macd_slow, self.rsi_period):
+                return  # Nu sunt destule date
 
-                if atr == 0.0 or df.isnull().any().any():
-                    time.sleep(5)
-                    continue
+            df = pd.DataFrame(rates)
+            df = calculate_atr(df, self.atr_period)
+            atr = float(df["atr"].iloc[-1])
 
-                signal = self.generate_signal(df)
-                if signal and self.risk_manager.check_max_daily_loss():
-                    entry_price = float(df["close"].iloc[-1])
+            if atr == 0.0 or df.isnull().any().any():
+                return  # ATR invalid sau date lipsă
 
-                    if signal == "BUY":
-                        sl = entry_price - self.sl_atr_multiplier * atr
-                        tp = entry_price + self.tp_atr_multiplier * atr
-                    else:  # SELL
-                        sl = entry_price + self.sl_atr_multiplier * atr
-                        tp = entry_price - self.tp_atr_multiplier * atr
+            signal = self.generate_signal(df)
+            if signal and self.risk_manager.check_max_daily_loss():
+                entry_price = float(df["close"].iloc[-1])
 
-                    lot = self.risk_manager.calculate_lot_size(active_symbol, signal, entry_price, sl)
-                    if lot > 0 and self.risk_manager.check_free_margin():
-                        self.trade_manager.open_trade(active_symbol, signal, lot, entry_price, sl, tp)
+                if signal == "BUY":
+                    sl = entry_price - self.sl_atr_multiplier * atr
+                    tp = entry_price + self.tp_atr_multiplier * atr
+                else:  # SELL
+                    sl = entry_price + self.sl_atr_multiplier * atr
+                    tp = entry_price - self.tp_atr_multiplier * atr
 
-                self.trade_manager.manage_trailing_stop(active_symbol)
-                time.sleep(10)
+                lot = self.risk_manager.calculate_lot_size(active_symbol, signal, entry_price, sl)
+                if lot > 0 and self.risk_manager.check_free_margin():
+                    self.trade_manager.open_trade(active_symbol, signal, lot, entry_price, sl, tp)
 
-            except Exception as e:
-                trace = traceback.format_exc()
-                self.logger.log(f"❌ Error in MomentumStrategy {active_symbol}: {e} - {trace}")
-                time.sleep(30)
+            # Trailing stop management
+            self.trade_manager.manage_trailing_stop(active_symbol)
+
+        except Exception as e:
+            trace = traceback.format_exc()
+            self.logger.log(f"❌ Error in MomentumStrategy {active_symbol}: {e}")
+            # Log trace only in debug mode to avoid spam
+            if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                self.logger.log(f"🔍 Stack trace: {trace}")

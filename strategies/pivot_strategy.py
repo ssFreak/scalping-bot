@@ -42,10 +42,12 @@ class PivotStrategy(BaseStrategy):
             # Use default behavior with self.symbol
             self.run_once()
 
-    def run_once(self):
+    def run_once(self, symbol=None):
         """Execută o singură iterație de strategie."""
+        active_symbol = symbol if symbol is not None else self.symbol
+        
         try:
-            rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 100)
+            rates = mt5.copy_rates_from_pos(active_symbol, mt5.TIMEFRAME_M1, 0, 100)
             if rates is None or len(rates) < 15:
                 return  # nu sunt destule date
 
@@ -61,14 +63,16 @@ class PivotStrategy(BaseStrategy):
 
                 sl = entry_price - 2.5 * atr if signal == "BUY" else entry_price + 2.5 * atr
 
-                lot = self.risk_manager.calculate_lot_size(self.symbol, signal, entry_price, sl)
+                lot = self.risk_manager.calculate_lot_size(active_symbol, signal, entry_price, sl)
                 if lot > 0 and self.risk_manager.check_free_margin():
-                    self.trade_manager.open_trade(self.symbol, signal, lot, entry_price, sl, tp)
+                    self.trade_manager.open_trade(active_symbol, signal, lot, entry_price, sl, tp)
 
             # trailing stop pentru simbol
-            self.trade_manager.manage_trailing_stop(self.symbol)
+            self.trade_manager.manage_trailing_stop(active_symbol)
 
         except Exception as e:
             trace = traceback.format_exc()
-            self.logger.log(f"❌ Error in PivotStrategy {self.symbol}: {e}\n{trace}")
-            time.sleep(2)
+            self.logger.log(f"❌ Error in PivotStrategy {active_symbol}: {e}")
+            # Log trace only in debug mode to avoid spam
+            if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                self.logger.log(f"🔍 Stack trace: {trace}")

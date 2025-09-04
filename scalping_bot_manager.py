@@ -3,6 +3,9 @@ import time
 import logging
 import yaml
 import os
+import threading
+import queue
+from datetime import datetime
 
 from strategies.pivot_strategy import PivotStrategy
 from strategies.ma_ribbon_strategy import MARibbonStrategy
@@ -36,6 +39,12 @@ class BotManager:
 
         # Strategii active
         self.strategies = []
+        
+        # Threading management
+        self.strategy_threads = {}  # Dict to store thread info: {thread_id: {thread, strategy, symbol, stop_event}}
+        self.shutdown_event = threading.Event()
+        self.thread_monitor_interval = 10  # seconds
+        
         self._load_strategies()
 
     def load_config(self, path):
@@ -101,84 +110,220 @@ class BotManager:
         
         self.logger.log(f"⚙️ Enabled strategy types in config: {', '.join(enabled_strategies) if enabled_strategies else 'None'}")
 
-    def run(self):
-        logger.info("Bot pornit...")
-        cycle_count = 0
+    def _create_strategy_thread(self, strategy, symbol):
+        """
+        Creează și pornește un thread pentru o strategie+simbol specific.
+        """
+        strategy_name = strategy.__class__.__name__
+        thread_id = f"{strategy_name}_{symbol}_{id(strategy)}"
+        stop_event = threading.Event()
+        
+        # Update strategy's stop event
+        strategy.stop_event = stop_event
+        
+        # Create thread
+        thread = threading.Thread(
+            target=strategy.run_threaded,
+            args=(symbol,),
+            name=thread_id,
+            daemon=True  # Allow main program to exit even if threads are running
+        )
+        
+        # Store thread info
+        self.strategy_threads[thread_id] = {
+            'thread': thread,
+            'strategy': strategy,
+            'symbol': symbol,
+            'stop_event': stop_event,
+            'strategy_name': strategy_name,
+            'start_time': datetime.now(),
+            'restart_count': 0
+        }
+        
+        # Start thread
+        thread.start()
+        self.logger.log(f"🚀 Thread started: {thread_id} (Thread ID: {thread.ident})")
+        
+        return thread_id
 
-        while True:
-            cycle_count += 1
-            logger.info(f"🔄 === Cycle {cycle_count} Start ===")
+    def _monitor_threads(self):
+        """
+        Monitorizează thread-urile active și repornește cele care au eșuat.
+        """
+        active_threads = []
+        failed_threads = []
+        
+        for thread_id, thread_info in list(self.strategy_threads.items()):
+            thread = thread_info['thread']
+            strategy = thread_info['strategy']
+            symbol = thread_info['symbol']
             
-            # Detailed logging of loaded strategies
-            strategy_summary = {}
-            for strategy in self.strategies:
-                strategy_name = strategy.__class__.__name__
-                strategy_symbol = getattr(strategy, 'symbol', 'Unknown')
-                if strategy_name not in strategy_summary:
-                    strategy_summary[strategy_name] = []
-                strategy_summary[strategy_name].append(strategy_symbol)
-            
-            logger.info(f"📊 Loaded strategies: {dict(strategy_summary)}")
-            logger.info(f"🎯 Target symbols: {self.symbols}")
-            
-            # Check can_trade with detailed logging
-            can_trade_status = self.risk_manager.can_trade(verbose=True)
-            
-            if not can_trade_status:
-                total_profit = self.trade_manager.get_today_total_profit()
-                is_market_open = is_forex_market_open()
-                logger.warning(f"⛔ Trading blocked - can_trade() returned False")
-                if not is_market_open:
-                    logger.warning("⏸ Piața Forex este închisă, botul nu poate deschide ordine.")
-                elif total_profit <= self.risk_manager.max_daily_loss:
-                    logger.warning(
-                        f"🚫 Max daily loss atins ({total_profit:.2f} <= {self.risk_manager.max_daily_loss:.2f}) - botul continuă să ruleze fără a mai deschide ordine."
-                    )
-                elif total_profit >= self.risk_manager.max_daily_profit:
-                    logger.warning(
-                        f"🎯 Daily profit target atins ({total_profit:.2f} >= {self.risk_manager.max_daily_profit:.2f}) - botul continuă să ruleze fără a mai deschide ordine."
-                    )
-                else:
-                    logger.warning("❓ Botul nu poate deschide ordine dintr-un motiv necunoscut.")
-                logger.info(f"⏳ Waiting 60 seconds before next cycle...")
-                time.sleep(60)
-                continue
-
-            # Strategy execution with detailed logging
-            logger.info(f"✅ Trading allowed - executing strategies for {len(self.symbols)} symbols")
-            execution_summary = []
-            
-            for symbol in self.symbols:
-                symbol_strategies = [s for s in self.strategies if getattr(s, 'symbol', None) == symbol]
-                logger.info(f"🔧 Processing symbol {symbol} with {len(symbol_strategies)} strategies: {[s.__class__.__name__ for s in symbol_strategies]}")
+            if thread.is_alive():
+                active_threads.append(f"{thread_id}(✅)")
+            else:
+                # Thread has died
+                failed_threads.append(thread_id)
+                self.logger.log(f"💀 Thread died: {thread_id}")
                 
+                # Remove dead thread
+                del self.strategy_threads[thread_id]
+                
+                # Restart thread if not shutting down
+                if not self.shutdown_event.is_set():
+                    self.logger.log(f"🔄 Restarting thread: {thread_id}")
+                    new_thread_id = self._create_strategy_thread(strategy, symbol)
+                    if new_thread_id in self.strategy_threads:
+                        self.strategy_threads[new_thread_id]['restart_count'] = thread_info['restart_count'] + 1
+        
+        return active_threads, failed_threads
+
+    def _start_all_strategy_threads(self):
+        """
+        Pornește thread-uri pentru toate combinațiile strategie+simbol.
+        """
+        self.logger.log(f"🚀 Starting threads for all strategy+symbol combinations...")
+        
+        for strategy in self.strategies:
+            symbol = strategy.symbol
+            thread_id = self._create_strategy_thread(strategy, symbol)
+            
+        self.logger.log(f"✅ Started {len(self.strategy_threads)} strategy threads")
+
+    def _stop_all_threads(self):
+        """
+        Oprește toate thread-urile în mod ordonat.
+        """
+        self.logger.log(f"🛑 Stopping all {len(self.strategy_threads)} strategy threads...")
+        
+        # Signal all threads to stop
+        for thread_info in self.strategy_threads.values():
+            thread_info['stop_event'].set()
+            thread_info['strategy'].stop()
+        
+        # Wait for threads to finish
+        timeout = 30  # seconds
+        for thread_id, thread_info in self.strategy_threads.items():
+            thread = thread_info['thread']
+            self.logger.log(f"⏳ Waiting for thread {thread_id} to stop...")
+            thread.join(timeout=timeout)
+            
+            if thread.is_alive():
+                self.logger.log(f"⚠️ Thread {thread_id} did not stop gracefully within {timeout}s")
+            else:
+                self.logger.log(f"✅ Thread {thread_id} stopped successfully")
+        
+        self.strategy_threads.clear()
+        self.logger.log(f"🏁 All strategy threads stopped")
+
+    def _get_thread_status_report(self):
+        """
+        Generează un raport cu statusul tuturor thread-urilor.
+        """
+        if not self.strategy_threads:
+            return "No strategy threads running"
+        
+        active_count = 0
+        status_details = []
+        
+        for thread_id, thread_info in self.strategy_threads.items():
+            thread = thread_info['thread']
+            strategy_name = thread_info['strategy_name']
+            symbol = thread_info['symbol']
+            start_time = thread_info['start_time']
+            restart_count = thread_info['restart_count']
+            
+            runtime = datetime.now() - start_time
+            runtime_str = f"{runtime.total_seconds():.0f}s"
+            
+            if thread.is_alive():
+                active_count += 1
+                status = "🟢"
+                status_details.append(f"{strategy_name}({symbol}): {status} {runtime_str} (restarts: {restart_count})")
+            else:
+                status = "🔴"
+                status_details.append(f"{strategy_name}({symbol}): {status} DEAD")
+        
+        report = f"Active threads: {active_count}/{len(self.strategy_threads)}\n"
+        report += "\n".join(status_details)
+        return report
+
+    def run(self):
+        logger.info("🚀 Bot starting with threading support...")
+        
+        try:
+            # Start all strategy threads
+            self._start_all_strategy_threads()
+            
+            monitor_cycle_count = 0
+            
+            # Main monitoring loop
+            while not self.shutdown_event.is_set():
+                monitor_cycle_count += 1
+                logger.info(f"🔄 === Monitor Cycle {monitor_cycle_count} Start ===")
+                
+                # Detailed logging of loaded strategies
+                strategy_summary = {}
                 for strategy in self.strategies:
                     strategy_name = strategy.__class__.__name__
                     strategy_symbol = getattr(strategy, 'symbol', 'Unknown')
-                    
-                    try:
-                        logger.info(f"▶️ Calling {strategy_name}.run({symbol}) (strategy configured for {strategy_symbol})")
-                        
-                        # Check if this strategy has infinite loop behavior
-                        import inspect
-                        strategy_run_source = inspect.getsource(strategy.run)
-                        has_while_loop = "while True" in strategy_run_source
-                        
-                        if has_while_loop:
-                            logger.warning(f"⚠️ {strategy_name} contains 'while True' loop - may block other strategies!")
-                        
-                        strategy.run(symbol)
-                        execution_summary.append(f"{strategy_name}({symbol}): ✅")
-                        logger.info(f"✅ {strategy_name}.run({symbol}) returned normally")
-                    except Exception as e:
-                        execution_summary.append(f"{strategy_name}({symbol}): ❌ {str(e)[:50]}")
-                        logger.error(f"❌ Eroare la strategia {strategy_name} pentru {symbol}: {e}")
-                        logger.error(f"🔍 Strategy {strategy_name} failed, continuing with next strategy...")
+                    if strategy_name not in strategy_summary:
+                        strategy_summary[strategy_name] = []
+                    strategy_summary[strategy_name].append(strategy_symbol)
+                
+                logger.info(f"📊 Loaded strategies: {dict(strategy_summary)}")
+                logger.info(f"🎯 Target symbols: {self.symbols}")
+                
+                # Check trading status
+                can_trade_status = self.risk_manager.can_trade(verbose=True)
+                
+                if not can_trade_status:
+                    total_profit = self.trade_manager.get_today_total_profit()
+                    is_market_open = is_forex_market_open()
+                    logger.warning(f"⛔ Trading blocked - can_trade() returned False")
+                    if not is_market_open:
+                        logger.warning("⏸ Piața Forex este închisă, thread-urile continuă să ruleze dar nu vor deschide ordine.")
+                    elif total_profit <= self.risk_manager.max_daily_loss:
+                        logger.warning(
+                            f"🚫 Max daily loss atins ({total_profit:.2f} <= {self.risk_manager.max_daily_loss:.2f}) - thread-urile continuă să ruleze fără a mai deschide ordine."
+                        )
+                    elif total_profit >= self.risk_manager.max_daily_profit:
+                        logger.warning(
+                            f"🎯 Daily profit target atins ({total_profit:.2f} >= {self.risk_manager.max_daily_profit:.2f}) - thread-urile continuă să ruleze fără a mai deschide ordine."
+                        )
+                    else:
+                        logger.warning("❓ Trading blocked dintr-un motiv necunoscut.")
+                else:
+                    logger.info(f"✅ Trading allowed - {len(self.strategy_threads)} strategy threads active")
 
-            # Cycle summary
-            logger.info(f"📋 Cycle {cycle_count} Summary: {'; '.join(execution_summary)}")
-            logger.info(f"⏳ Cycle {cycle_count} complete - waiting 5 seconds...")
-            time.sleep(5)  # Delay între cicluri
+                # Monitor and manage threads
+                active_threads, failed_threads = self._monitor_threads()
+                
+                if failed_threads:
+                    logger.warning(f"💀 Failed threads in this cycle: {len(failed_threads)}")
+                    for thread_id in failed_threads:
+                        logger.warning(f"   - {thread_id}")
+                
+                # Thread status report
+                thread_status = self._get_thread_status_report()
+                logger.info(f"🧵 Thread Status Report:\n{thread_status}")
+                
+                # Wait before next monitoring cycle
+                logger.info(f"⏳ Monitor cycle {monitor_cycle_count} complete - waiting {self.thread_monitor_interval} seconds...")
+                
+                # Use shutdown_event.wait() instead of time.sleep() for graceful shutdown
+                if self.shutdown_event.wait(timeout=self.thread_monitor_interval):
+                    logger.info("🛑 Shutdown signal received during wait")
+                    break
+                    
+        except KeyboardInterrupt:
+            logger.info("🛑 Keyboard interrupt received")
+        except Exception as e:
+            logger.error(f"❌ Fatal error in main loop: {e}")
+        finally:
+            logger.info("🏁 Bot shutdown initiated...")
+            self.shutdown_event.set()
+            self._stop_all_threads()
+            logger.info("🏁 Bot shutdown complete")
 
 # === MAIN ===
 if __name__ == "__main__":
