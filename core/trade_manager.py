@@ -24,9 +24,12 @@ class TradeManager:
         # Verificare globală: nu trimitem ordine dacă bot_manager spune că nu se poate trade-a
         if hasattr(self, 'bot_manager') and self.bot_manager is not None:
             try:
-                if not self.bot_manager.risk_manager.can_trade():
+                can_trade_status = self.bot_manager.risk_manager.can_trade(verbose=True)
+                if not can_trade_status:
                     self.logger.log("⛔ Deschidere ordin blocată: condiții globale nu permit tranzacționarea (max_daily_loss/market).")
                     return False
+                else:
+                    self.logger.log(f"✅ can_trade() check passed - proceeding with {order_type} order for {symbol}")
             except Exception as e:
                 # dacă ceva e greșit la can_trade, blocăm pentru siguranță
                 self.logger.log(f"❌ Eroare la verificarea can_trade() înainte de open_trade: {e}")
