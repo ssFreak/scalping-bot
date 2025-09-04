@@ -32,6 +32,9 @@ general:
   # Trailing stop global (activat la acest prag de profit)
   trailing_profit_threshold: 15.0
 
+  # Thread monitoring configuration
+  thread_monitor_logging: true
+
 # ==========================
 # Configurația strategiilor
 # ==========================
@@ -44,7 +47,7 @@ strategies:
     atr_period: 14           # ATR pentru SL
 
   moving_average_ribbon:
-    enabled: true
+    enabled: false
     timeframe: M5            # Rulează pe M5
     sma_periods: [5, 8, 13]  # Perioadele SMA folosite pentru semnale
     atr_period: 14           # ATR pentru calcul SL/TP
@@ -52,7 +55,7 @@ strategies:
     sl_atr_multiplier: 2.5   # Multiplicator ATR pentru SL
 
   momentum_scalping:
-    enabled: true
+    enabled: false
     timeframe: M1            # Rulează pe M1 (momentum rapid)
     rsi_period: 14           # RSI pentru detectarea momentum-ului
     macd_fast: 12

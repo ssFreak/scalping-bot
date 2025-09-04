@@ -44,6 +44,7 @@ class BotManager:
         self.strategy_threads = {}  # Dict to store thread info: {thread_id: {thread, strategy, symbol, stop_event}}
         self.shutdown_event = threading.Event()
         self.thread_monitor_interval = 10  # seconds
+        self.thread_monitor_logging = self.config.get("general", {}).get("thread_monitor_logging", True)  # Default to True for backward compatibility
         
         self._load_strategies()
 
@@ -146,9 +147,12 @@ class BotManager:
         
         return thread_id
 
-    def _monitor_threads(self):
+    def _monitor_threads(self, enable_logging=True):
         """
         Monitorizează thread-urile active și repornește cele care au eșuat.
+        
+        Args:
+            enable_logging (bool): Whether to enable detailed logging of thread monitoring activities
         """
         active_threads = []
         failed_threads = []
@@ -163,14 +167,16 @@ class BotManager:
             else:
                 # Thread has died
                 failed_threads.append(thread_id)
-                self.logger.log(f"💀 Thread died: {thread_id}")
+                if enable_logging:
+                    self.logger.log(f"💀 Thread died: {thread_id}")
                 
                 # Remove dead thread
                 del self.strategy_threads[thread_id]
                 
                 # Restart thread if not shutting down
                 if not self.shutdown_event.is_set():
-                    self.logger.log(f"🔄 Restarting thread: {thread_id}")
+                    if enable_logging:
+                        self.logger.log(f"🔄 Restarting thread: {thread_id}")
                     new_thread_id = self._create_strategy_thread(strategy, symbol)
                     if new_thread_id in self.strategy_threads:
                         self.strategy_threads[new_thread_id]['restart_count'] = thread_info['restart_count'] + 1
@@ -296,7 +302,7 @@ class BotManager:
                     logger.info(f"✅ Trading allowed - {len(self.strategy_threads)} strategy threads active")
 
                 # Monitor and manage threads
-                active_threads, failed_threads = self._monitor_threads()
+                active_threads, failed_threads = self._monitor_threads(self.thread_monitor_logging)
                 
                 if failed_threads:
                     logger.warning(f"💀 Failed threads in this cycle: {len(failed_threads)}")
