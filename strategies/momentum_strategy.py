@@ -62,7 +62,7 @@ class MomentumStrategy(BaseStrategy):
         # Use the provided symbol parameter or fall back to self.symbol for backward compatibility
         active_symbol = symbol if symbol is not None else self.symbol
         self.logger.log(f"▶️ Starting MomentumStrategy for {active_symbol}")
-        while True and self.bot_manager.trading_active:
+        while True and self.risk_manager.can_trade():
             try:
                 rates = mt5.copy_rates_from_pos(
                     active_symbol, self.timeframe, 0, max(self.macd_slow, self.rsi_period, self.atr_period) + 5
