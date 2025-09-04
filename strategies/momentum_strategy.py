@@ -58,12 +58,14 @@ class MomentumStrategy(BaseStrategy):
 
         return None
 
-    def run(self):
-        self.logger.log(f"▶️ Starting MomentumStrategy for {self.symbol}")
+    def run(self, symbol=None):
+        # Use the provided symbol parameter or fall back to self.symbol for backward compatibility
+        active_symbol = symbol if symbol is not None else self.symbol
+        self.logger.log(f"▶️ Starting MomentumStrategy for {active_symbol}")
         while True and self.bot_manager.trading_active:
             try:
                 rates = mt5.copy_rates_from_pos(
-                    self.symbol, self.timeframe, 0, max(self.macd_slow, self.rsi_period, self.atr_period) + 5
+                    active_symbol, self.timeframe, 0, max(self.macd_slow, self.rsi_period, self.atr_period) + 5
                 )
                 if rates is None or len(rates) < max(self.macd_slow, self.rsi_period):
                     time.sleep(5)
@@ -88,14 +90,14 @@ class MomentumStrategy(BaseStrategy):
                         sl = entry_price + self.sl_atr_multiplier * atr
                         tp = entry_price - self.tp_atr_multiplier * atr
 
-                    lot = self.risk_manager.calculate_lot_size(self.symbol, signal, entry_price, sl)
+                    lot = self.risk_manager.calculate_lot_size(active_symbol, signal, entry_price, sl)
                     if lot > 0 and self.risk_manager.check_free_margin():
-                        self.trade_manager.open_trade(self.symbol, signal, lot, entry_price, sl, tp)
+                        self.trade_manager.open_trade(active_symbol, signal, lot, entry_price, sl, tp)
 
-                self.trade_manager.manage_trailing_stop(self.symbol)
+                self.trade_manager.manage_trailing_stop(active_symbol)
                 time.sleep(10)
 
             except Exception as e:
                 trace = traceback.format_exc()
-                self.logger.log(f"❌ Error in MomentumStrategy {self.symbol}: {e} - {trace}")
+                self.logger.log(f"❌ Error in MomentumStrategy {active_symbol}: {e} - {trace}")
                 time.sleep(30)

@@ -46,6 +46,22 @@ class MARibbonStrategy(BaseStrategy):
 
         return None
 
+    def run(self, symbol=None):
+        """Unified interface method that calls run_once()."""
+        # Use the provided symbol parameter or fall back to self.symbol for backward compatibility
+        if symbol is not None:
+            # Temporarily use the provided symbol for this run
+            original_symbol = self.symbol
+            self.symbol = symbol
+            try:
+                self.run_once()
+            finally:
+                # Restore original symbol
+                self.symbol = original_symbol
+        else:
+            # Use default behavior with self.symbol
+            self.run_once()
+
     def run_once(self):
         """Execută o singură iterație de strategie."""
         try:
