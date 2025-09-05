@@ -57,12 +57,8 @@ class BotManager:
     def _load_strategies(self):
         cfg = self.config["strategies"]
         strategy_count = 0
-        
-        self.logger.log(f"🔄 Loading strategies for symbols: {self.symbols}")
     
         for symbol in self.symbols:
-            symbol_strategies = []
-            
             if cfg.get("pivot", {}).get("enabled", False):
                 self.strategies.append(PivotStrategy(
                     symbol,
@@ -72,7 +68,6 @@ class BotManager:
                     self.trade_manager,
                     self
                 ))
-                symbol_strategies.append("PivotStrategy")
                 strategy_count += 1
     
             if cfg.get("moving_average_ribbon", {}).get("enabled", False):
@@ -84,7 +79,6 @@ class BotManager:
                     self.trade_manager,
                     self
                 ))
-                symbol_strategies.append("MARibbonStrategy")
                 strategy_count += 1
     
             if cfg.get("momentum_scalping", {}).get("enabled", False):
@@ -96,20 +90,7 @@ class BotManager:
                     self.trade_manager,
                     self
                 ))
-                symbol_strategies.append("MomentumStrategy")
                 strategy_count += 1
-            
-            self.logger.log(f"📈 {symbol}: Loaded {len(symbol_strategies)} strategies: {', '.join(symbol_strategies)}")
-    
-        self.logger.log(f"✅ Total strategies loaded: {strategy_count} ({len(self.strategies)} strategy instances)")
-        
-        # Log strategy configuration status
-        enabled_strategies = []
-        for strategy_name, strategy_config in cfg.items():
-            if isinstance(strategy_config, dict) and strategy_config.get("enabled", False):
-                enabled_strategies.append(strategy_name)
-        
-        self.logger.log(f"⚙️ Enabled strategy types in config: {', '.join(enabled_strategies) if enabled_strategies else 'None'}")
 
     def _create_strategy_thread(self, strategy, symbol):
         """
@@ -223,35 +204,23 @@ class BotManager:
 
     def _get_thread_status_report(self):
         """
-        Generează un raport cu statusul tuturor thread-urilor.
+        Generează un raport cu statusul tuturor thread-urilor (doar count-uri).
         """
         if not self.strategy_threads:
             return "No strategy threads running"
         
         active_count = 0
-        status_details = []
+        failed_count = 0
         
         for thread_id, thread_info in self.strategy_threads.items():
             thread = thread_info['thread']
-            strategy_name = thread_info['strategy_name']
-            symbol = thread_info['symbol']
-            start_time = thread_info['start_time']
-            restart_count = thread_info['restart_count']
-            
-            runtime = datetime.now() - start_time
-            runtime_str = f"{runtime.total_seconds():.0f}s"
             
             if thread.is_alive():
                 active_count += 1
-                status = "🟢"
-                status_details.append(f"{strategy_name}({symbol}): {status} {runtime_str} (restarts: {restart_count})")
             else:
-                status = "🔴"
-                status_details.append(f"{strategy_name}({symbol}): {status} DEAD")
+                failed_count += 1
         
-        report = f"Active threads: {active_count}/{len(self.strategy_threads)}\n"
-        report += "\n".join(status_details)
-        return report
+        return f"Active threads: {active_count}, Failed threads: {failed_count}, Total: {len(self.strategy_threads)}"
 
     def run(self):
         logger.info("🚀 Bot starting with threading support...")
@@ -267,17 +236,7 @@ class BotManager:
                 monitor_cycle_count += 1
                 logger.info(f"🔄 === Monitor Cycle {monitor_cycle_count} Start ===")
                 
-                # Detailed logging of loaded strategies
-                strategy_summary = {}
-                for strategy in self.strategies:
-                    strategy_name = strategy.__class__.__name__
-                    strategy_symbol = getattr(strategy, 'symbol', 'Unknown')
-                    if strategy_name not in strategy_summary:
-                        strategy_summary[strategy_name] = []
-                    strategy_summary[strategy_name].append(strategy_symbol)
-                
-                logger.info(f"📊 Loaded strategies: {dict(strategy_summary)}")
-                logger.info(f"🎯 Target symbols: {self.symbols}")
+
                 
                 # Check trading status
                 can_trade_status = self.risk_manager.can_trade(verbose=True)
@@ -311,7 +270,7 @@ class BotManager:
                 
                 # Thread status report
                 thread_status = self._get_thread_status_report()
-                logger.info(f"🧵 Thread Status Report:\n{thread_status}")
+                logger.info(f"🧵 {thread_status}")
                 
                 # Wait before next monitoring cycle
                 logger.info(f"⏳ Monitor cycle {monitor_cycle_count} complete - waiting {self.thread_monitor_interval} seconds...")
