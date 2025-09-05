@@ -49,23 +49,49 @@ class PivotStrategy(BaseStrategy):
         try:
             rates = mt5.copy_rates_from_pos(active_symbol, mt5.TIMEFRAME_M1, 0, 100)
             if rates is None or len(rates) < 15:
+                # Debug log for insufficient data
+                if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                    self.logger.log(f"🔍 PivotStrategy({active_symbol}): Insufficient data - rates: {rates is not None}, length: {len(rates) if rates is not None else 0}")
                 return  # nu sunt destule date
 
             df = pd.DataFrame(rates)
 
             # Generează semnal
             signal, tp = self.generate_signal(df)
-            if signal:
-                entry_price = float(df.iloc[-1]['close'])
-                atr = float(calculate_atr(df, 14).iloc[-1]['atr'])
-                if atr <= 0:
-                    return
+            if signal is None:
+                # Debug log for no signal
+                if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                    self.logger.log(f"🔍 PivotStrategy({active_symbol}): No signal generated")
+                return
 
-                sl = entry_price - 2.5 * atr if signal == "BUY" else entry_price + 2.5 * atr
+            entry_price = float(df.iloc[-1]['close'])
+            atr = float(calculate_atr(df, 14).iloc[-1]['atr'])
+            if atr <= 0:
+                # Debug log for ATR zero
+                if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                    self.logger.log(f"🔍 PivotStrategy({active_symbol}): ATR is zero or negative: {atr}")
+                return
 
-                lot = self.risk_manager.calculate_lot_size(active_symbol, signal, entry_price, sl)
-                if lot > 0 and self.risk_manager.check_free_margin():
-                    self.trade_manager.open_trade(active_symbol, signal, lot, entry_price, sl, tp)
+            sl = entry_price - 2.5 * atr if signal == "BUY" else entry_price + 2.5 * atr
+
+            lot = self.risk_manager.calculate_lot_size(active_symbol, signal, entry_price, sl)
+            if lot <= 0:
+                # Debug log for lot zero
+                if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                    self.logger.log(f"🔍 PivotStrategy({active_symbol}): Lot size is zero or negative: {lot}")
+                return
+
+            if not self.risk_manager.check_free_margin():
+                # Debug log for insufficient margin
+                if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                    self.logger.log(f"🔍 PivotStrategy({active_symbol}): Insufficient margin available")
+                return
+
+            # All checks passed, open trade
+            if hasattr(self.config, 'debug') and self.config.get('debug', False):
+                self.logger.log(f"🔍 PivotStrategy({active_symbol}): Opening {signal} trade - Entry: {entry_price}, SL: {sl}, TP: {tp}, Lot: {lot}")
+            
+            self.trade_manager.open_trade(active_symbol, signal, lot, entry_price, sl, tp)
 
             # trailing stop pentru simbol
             self.trade_manager.manage_trailing_stop(active_symbol)
