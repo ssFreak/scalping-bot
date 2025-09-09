@@ -14,6 +14,7 @@ from core.risk_manager import RiskManager
 from core.trade_manager import TradeManager
 from core.logger import Logger
 from core.utils import is_forex_market_open
+from core.mt5_connector import MT5Connector
 
 # === Setup logging ===
 logging.basicConfig(
@@ -36,6 +37,9 @@ class BotManager:
         self.trade_manager = TradeManager(logger=self.logger, magic_number=13930, trade_deviation=10, bot_manager=self)
         # Risk Manager
         self.risk_manager = RiskManager(self.config["general"], logger=self.logger, trade_manager=self.trade_manager)
+        # Inițializează MT5
+        self.mt5_connector = MT5Connector(self.logger)
+        self.mt5_connector.initialize()
 
         # Strategii active
         self.strategies = []
@@ -43,7 +47,7 @@ class BotManager:
         # Threading management
         self.strategy_threads = {}  # Dict to store thread info: {thread_id: {thread, strategy, symbol, stop_event}}
         self.shutdown_event = threading.Event()
-        self.thread_monitor_interval = 10  # seconds
+        self.thread_monitor_interval = 3600  # seconds
         self.thread_monitor_logging = self.config.get("general", {}).get("thread_monitor_logging", True)  # Default to True for backward compatibility
         
         self._load_strategies()
@@ -235,9 +239,7 @@ class BotManager:
             while not self.shutdown_event.is_set():
                 monitor_cycle_count += 1
                 logger.info(f"🔄 === Monitor Cycle {monitor_cycle_count} Start ===")
-                
-
-                
+               
                 # Check trading status
                 can_trade_status = self.risk_manager.can_trade(verbose=True)
                 

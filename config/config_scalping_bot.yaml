@@ -47,7 +47,7 @@ strategies:
     atr_period: 14           # ATR pentru SL
 
   moving_average_ribbon:
-    enabled: false
+    enabled: true
     timeframe: M5            # Rulează pe M5
     sma_periods: [5, 8, 13]  # Perioadele SMA folosite pentru semnale
     atr_period: 14           # ATR pentru calcul SL/TP

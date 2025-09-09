@@ -36,6 +36,7 @@ class BaseStrategy:
         try:
             # Call the strategy's run method in a controlled loop
             while not self.stop_event.is_set() and self.risk_manager.can_trade():
+                #self.logger.log(f"🔍 [DEBUG] Loop activ pentru {strategy_name} pe {active_symbol}")
                 try:
                     # Call the actual strategy implementation
                     self.run_once(active_symbol)
