@@ -1,25 +1,16 @@
-import logging
-from datetime import datetime
+# core/logger.py
+import datetime
 import os
 
-class Logger:
-    def __init__(self, filename="trading_log.txt"):
-        self.filename = os.path.join(os.getcwd(), filename) # Salvează log-ul în directorul curent
-        
-        # Configurează logger-ul de bază, doar dacă nu este deja configurat
-        if not logging.getLogger().handlers:
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(message)s',
-                handlers=[
-                    logging.FileHandler(self.filename, encoding='utf-8'),
-                    logging.StreamHandler()
-                ]
-            )
-        self.logger = logging.getLogger()
 
-    def log(self, message):
-        """
-        Înregistrează un mesaj. Va fi afișat în consolă și scris în fișier.
-        """
-        self.logger.info(message)
+class Logger:
+    def __init__(self, log_dir="logs"):
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_file = os.path.join(log_dir, f"log_{datetime.date.today()}.txt")
+
+    def log(self, message: str):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        print(line)
+        with open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(line + "\n")

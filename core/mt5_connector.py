@@ -1,62 +1,74 @@
 import MetaTrader5 as mt5
 
+
 class MT5Connector:
-    def __init__(self, logger=None):
+    def __init__(self, logger):
         self.logger = logger
+        self.connected = False
 
+        # Expose MT5 constants
+        self.ORDER_TYPE_BUY = mt5.ORDER_TYPE_BUY
+        self.ORDER_TYPE_SELL = mt5.ORDER_TYPE_SELL
+        self.TRADE_ACTION_DEAL = mt5.TRADE_ACTION_DEAL
+        self.TRADE_ACTION_SLTP = mt5.TRADE_ACTION_SLTP
+        self.ORDER_TIME_GTC = mt5.ORDER_TIME_GTC
+        self.ORDER_FILLING_FOK = mt5.ORDER_FILLING_FOK
+        self.TRADE_RETCODE_DONE = mt5.TRADE_RETCODE_DONE
+
+    # Connection
     def initialize(self, login=None, password=None, server=None):
-        """
-        Inițializează conexiunea cu MetaTrader5.
-        Dacă nu se dau login/parola/server, folosește terminalul deja deschis.
-        """
         if not mt5.initialize():
-            error = mt5.last_error()
-            if self.logger:
-                self.logger.log(f"❌ MT5 init failed: {error}")
-            raise RuntimeError(f"MT5 initialization failed: {error}")
-        else:
-            if self.logger:
-                self.logger.log("✅ MT5 initialized successfully")
-
-        # Dacă s-a dat login explicit -> facem și login
+            self.logger.log(f"❌ MT5 initialize failed: {mt5.last_error()}")
+            return False
         if login and password and server:
-            authorized = mt5.login(login=login, password=password, server=server)
-            if not authorized:
-                error = mt5.last_error()
-                if self.logger:
-                    self.logger.log(f"❌ MT5 login failed: {error}")
-                raise RuntimeError(f"MT5 login failed: {error}")
-            else:
-                if self.logger:
-                    self.logger.log(f"✅ Logged in to account {login} on server {server}")
-
-        # Verifică contul
-        account_info = mt5.account_info()
-        if account_info is None:
-            if self.logger:
-                self.logger.log("❌ No account connected")
-            raise RuntimeError("No account connected to MT5")
-        else:
-            if self.logger:
-                self.logger.log(
-                    f"✅ Connected to account {account_info.login}, balance={account_info.balance}"
-                )
+            if not mt5.login(login=login, password=password, server=server):
+                self.logger.log(f"❌ MT5 login failed: {mt5.last_error()}")
+                return False
+        self.connected = True
+        self.logger.log("✅ MT5 connection established.")
         return True
 
     def shutdown(self):
-        """Închide conexiunea cu MetaTrader5."""
-        mt5.shutdown()
-        if self.logger:
-            self.logger.log("👋 MT5 connection closed")
+        if self.connected:
+            mt5.shutdown()
+            self.connected = False
+            self.logger.log("📴 MT5 connection closed.")
 
-    def get_symbols(self):
-        """Returnează lista de simboluri disponibile."""
-        return [s.name for s in mt5.symbols_get()]
+    # Account
+    def get_account_info(self):
+        return mt5.account_info()
 
-    def get_rates(self, symbol, timeframe=mt5.TIMEFRAME_M15, count=10):
-        """Returnează ultimele candele pentru un simbol dat."""
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
-        if rates is None:
-            if self.logger:
-                self.logger.log(f"⚠️ No rates data for {symbol}")
-        return rates
+    def get_equity(self):
+        info = mt5.account_info()
+        return info.equity if info else 0.0
+
+    def get_free_margin(self):
+        info = mt5.account_info()
+        return info.margin_free if info else 0.0
+
+    # Market Data
+    def get_symbol_info(self, symbol):
+        return mt5.symbol_info(symbol)
+
+    def symbol_select(self, symbol, enable=True):
+        return mt5.symbol_select(symbol, enable)
+
+    def get_tick(self, symbol):
+        return mt5.symbol_info_tick(symbol)
+
+    def get_rates(self, symbol, timeframe, count=100):
+        return mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+
+    def history_deals_get(self, frm, to):
+        return mt5.history_deals_get(frm, to)
+
+    def get_positions(self, symbol=None):
+        return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+
+    # Orders
+    def order_send(self, request):
+        return mt5.order_send(request)
+
+    # Helpers
+    def get_timeframe(self, tf_str: str):
+        return getattr(mt5, f"TIMEFRAME_{tf_str}", None)

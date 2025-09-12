@@ -7,3 +7,5 @@ ema_rsi_strategy.py
 linear_regression_strategy.py
 rmi_trend_sync_strategy.py
 trading_log.txt
+logs/
+trading_journal_30_days.xlsx
