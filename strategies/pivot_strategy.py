@@ -10,6 +10,7 @@ class PivotStrategy(BaseStrategy):
     def __init__(self, symbol, config, logger, risk_manager, trade_manager, mt5_connector):
         super().__init__(symbol, config, logger, risk_manager, trade_manager, mt5_connector)
         self.timeframe = self.mt5.get_timeframe(config.get("timeframe", "M1"))
+        self.trade_manager.set_trailing_timeframe(self.symbol, self.timeframe)
         self.atr_period = config.get("atr_period", 14)
         self.atr_multiplier = config.get("atr_multiplier", 2.5)
         self.min_atr_points = config.get("min_atr_points", 25)
@@ -24,13 +25,13 @@ class PivotStrategy(BaseStrategy):
         try:
             # intraday data
             rates = self.mt5.get_rates(sym, self.timeframe, 200)
-            if not rates or len(rates) < 50:
+            if rates is None or len(rates) < 50:
                 return
             df = pd.DataFrame(rates)
 
             # daily pivots from previous D1 bar
             d1 = self.mt5.get_rates(sym, self.mt5.get_timeframe("D1"), 20)
-            if not d1 or len(d1) < 2:
+            if d1 is None or len(d1) < 2:
                 return
             d1df = pd.DataFrame(d1)
             pivots = calculate_daily_pivots_from_rates(d1df)
@@ -94,8 +95,7 @@ class PivotStrategy(BaseStrategy):
 
             ok = self.trade_manager.open_trade(sym, signal, lot, entry, sl, tp)
             if ok:
-                ts_distance = self.ts_atr_multiplier * atr  # price units
-                self.trade_manager.manage_trailing_stop(sym, ts_atr=ts_distance)
+                self.trade_manager.manage_trailing_stop(sym)
 
         except Exception as e:
             self.logger.log(f"❌ Error in PivotStrategy {sym}: {e}")

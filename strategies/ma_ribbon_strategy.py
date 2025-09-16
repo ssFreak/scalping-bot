@@ -14,6 +14,7 @@ class MARibbonStrategy(BaseStrategy):
         self.tp_atr_multiplier = config.get("tp_atr_multiplier", 1.5)
         self.sl_atr_multiplier = config.get("sl_atr_multiplier", 2.5)
         self.timeframe = self.mt5.get_timeframe(config.get("timeframe", "M5"))
+        self.trade_manager.set_trailing_timeframe(self.symbol, self.timeframe)
         self.min_atr_points = config.get("min_atr_points", 60)
         self.rsi_period = config.get("rsi_period", 14)
         self.macd_fast = config.get("macd_fast", 12)
@@ -40,7 +41,7 @@ class MARibbonStrategy(BaseStrategy):
         try:
             count = max(self.sma_periods) + self.atr_period + 10
             rates = self.mt5.get_rates(sym, self.timeframe, count)
-            if not rates or len(rates) < count - 5:
+            if rates is None or len(rates) < count - 5:
                 return
             df = pd.DataFrame(rates)
 
@@ -94,8 +95,7 @@ class MARibbonStrategy(BaseStrategy):
 
             ok = self.trade_manager.open_trade(sym, signal, lot, entry, sl, tp)
             if ok:
-                ts_distance = self.ts_atr_multiplier * atr
-                self.trade_manager.manage_trailing_stop(sym, ts_atr=ts_distance)
+                self.trade_manager.manage_trailing_stop(sym)
 
         except Exception as e:
             self.logger.log(f"❌ Error in MARibbonStrategy {sym}: {e}")

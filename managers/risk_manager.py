@@ -1,6 +1,6 @@
 import os
+import time
 from datetime import date, datetime, timezone, time as dtime
-
 
 class RiskManager:
     def __init__(self, config, logger, mt5_connector):
@@ -25,6 +25,10 @@ class RiskManager:
         self.equity_start_day = None
         self.last_trade_time_by_symbol = {}  # symbol -> datetime
 
+        # For verbose logging rate limit
+        self.last_can_trade_log = 0.0
+        self.can_trade_log_interval = 5 * 60  # 5 minute in seconds
+
         self.logger.log(f"📂 RiskManager loaded from: {os.path.abspath(__file__)}")
         self.logger.log(
             f"⚙️ lot={self.fixed_lot_size}, max_trades/day={self.max_trades_per_day}, "
@@ -43,7 +47,6 @@ class RiskManager:
             self.last_trade_time_by_symbol.clear()
 
     def _today_utc_bounds(self):
-        # folosește ziua UTC pentru deals
         now = datetime.now(timezone.utc)
         start = datetime.combine(now.date(), dtime(0, 0, 0), tzinfo=timezone.utc)
         return start, now
@@ -81,7 +84,6 @@ class RiskManager:
         return True
 
     def can_open_symbol(self, symbol):
-        """Cooldown + one-position-per-symbol (dacă e activ)."""
         # cooldown
         last_t = self.last_trade_time_by_symbol.get(symbol)
         if last_t:
@@ -92,7 +94,6 @@ class RiskManager:
 
         if self.one_position_per_symbol:
             open_pos = self.mt5.get_positions(symbol=symbol) or []
-            # opțional: filtrați după magic number, dacă îl aveți la îndemână aici
             if len(open_pos) > 0:
                 self.logger.log(f"🚫 {symbol}: already has open position(s).")
                 return False
@@ -120,13 +121,16 @@ class RiskManager:
 
         result = cond_loss and cond_profit and cond_margin and cond_trades and cond_drawdown
 
+        # verbose logging, but rate-limited
         if verbose:
-            self.logger.log(
-                f"🔍 [can_trade] equity={equity:.2f}, free_margin={free_margin:.2f}, "
-                f"PnL(today)={total_profit:.2f}, trades={self.trades_today}/{self.max_trades_per_day} | "
-                f"loss={cond_loss}, profit={cond_profit}, margin={cond_margin}, "
-                f"trades_ok={cond_trades}, drawdown_ok={cond_drawdown} => {result}"
-            )
+            now = time.time()
+            if now - self.last_can_trade_log > self.can_trade_log_interval:
+                self.last_can_trade_log = now
+                self.logger.log(
+                    f"🔍 [can_trade] equity={equity:.2f}, free_margin={free_margin:.2f}, "
+                    f"PnL(today)={total_profit:.2f}, trades={self.trades_today}/{self.max_trades_per_day} => {result}"
+                )
+
         return result
 
     def register_trade(self, symbol):
