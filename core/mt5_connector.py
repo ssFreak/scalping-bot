@@ -2,105 +2,98 @@ import MetaTrader5 as mt5
 
 class MT5Connector:
     def __init__(self, logger):
-        self.connected = False
         self.logger = logger
+        self.initialized = False
+        self.mt5 = None
 
     def initialize(self, login=None, password=None, server=None):
-        if self.connected:
-            return True
+        ok = False
         if login and password and server:
-            self.connected = mt5.initialize(login=login, password=password, server=server)
+            ok = mt5.initialize(login=login, password=password, server=server)
         else:
-            self.connected = mt5.initialize()
-        return self.connected
+            ok = mt5.initialize()
 
-    def shutdown(self):
-        if self.connected:
-            mt5.shutdown()
-            self.connected = False
+        if not ok:
+            if self.logger:
+                self.logger.log(f"❌ MT5 initialization failed: {mt5.last_error()}")
+            return False
 
-    # --------------------------
-    #   Data
-    # --------------------------
+        self.mt5 = mt5
+        self.initialized = True
+        if self.logger:
+            self.logger.log("✅ MT5 initialized")
+        return True
+
+    # --- account
     def get_account_info(self):
-        return mt5.account_info()
-        
-    def symbol_select(self, symbol: str, enable: bool = True):
-        return mt5.symbol_select(symbol, enable)
+        return self.mt5.account_info() if self.mt5 else None
 
-    def get_timeframe(self, tf: str):
-        return getattr(mt5, f"TIMEFRAME_{tf.upper()}", None)
-
-    def get_symbol_tick(self, symbol):
-        return mt5.symbol_info_tick(symbol)
-
-    def get_symbol_info_tick(self, symbol):
-        """
-        Compatibilitate: întoarce tick-ul curent (bid/ask) pentru simbol.
-        Echivalent cu mt5.symbol_info_tick(symbol).
-        """
-        return mt5.symbol_info_tick(symbol)
+    # --- symbol ops
+    def symbol_select(self, symbol, enable=True):
+        return self.mt5.symbol_select(symbol, enable) if self.mt5 else False
 
     def get_symbol_info(self, symbol):
-        return mt5.symbol_info(symbol)
+        return self.mt5.symbol_info(symbol) if self.mt5 else None
+
+    def get_symbol_info_tick(self, symbol):
+        return self.mt5.symbol_info_tick(symbol) if self.mt5 else None
 
     def get_symbol_tick(self, symbol):
-        return mt5.symbol_info_tick(symbol)
+        # alias convenabil (nu schimbă semnături existente)
+        return self.get_symbol_info_tick(symbol)
 
-    def get_rates(self, symbol, timeframe, count=100):
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
-        return None if rates is None else rates
+    # --- market data
+    def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
+        return self.mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count) if self.mt5 else None
 
-    def get_positions(self, symbol=None):
-        return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+    def copy_rates_range(self, symbol, timeframe, date_from, date_to):
+        return self.mt5.copy_rates_range(symbol, timeframe, date_from, date_to) if self.mt5 else None
+
+    # wrapper comod, des folosit în proiect
+    def get_rates(self, symbol, timeframe, count):
+        return self.copy_rates_from_pos(symbol, timeframe, 0, count)
+
+    # --- orders / positions / history
+    def order_send(self, request):
+        return self.mt5.order_send(request) if self.mt5 else None
+
+    def positions_get(self, symbol=None):
+        if not self.mt5:
+            return None
+        return self.mt5.positions_get(symbol=symbol) if symbol else self.mt5.positions_get()
+
+    def orders_get(self, symbol=None):
+        if not self.mt5:
+            return None
+        return self.mt5.orders_get(symbol=symbol) if symbol else self.mt5.orders_get()
 
     def history_deals_get(self, date_from, date_to):
-        return mt5.history_deals_get(date_from, date_to)
+        return self.mt5.history_deals_get(date_from, date_to) if self.mt5 else None
 
-    # --------------------------
-    #   Orders
-    # --------------------------
-    def order_send(self, request):
-        return mt5.order_send(request)
+    def history_orders_get(self, date_from, date_to):
+        return self.mt5.history_orders_get(date_from, date_to) if self.mt5 else None
 
-    def last_error(self):
-        return mt5.last_error()
+    # --- timeframes
+    def get_timeframe(self, tf_str):
+        # ex: 'M1', 'M5', 'H1'
+        return getattr(self.mt5, f"TIMEFRAME_{tf_str.upper()}") if self.mt5 else None
 
-    # --------------------------
-    #   Constants proxy
-    # --------------------------
-    @property
-    def ORDER_TYPE_BUY(self): return mt5.ORDER_TYPE_BUY
-    @property
-    def ORDER_TYPE_SELL(self): return mt5.ORDER_TYPE_SELL
-    @property
-    def ORDER_TYPE_BUY_STOP(self): return mt5.ORDER_TYPE_BUY_STOP
-    @property
-    def ORDER_TYPE_SELL_STOP(self): return mt5.ORDER_TYPE_SELL_STOP
+    # --- pips util
+    def get_pip_size(self, symbol):
+        """
+        Returnează dimensiunea unui PIP pentru simbol:
+          - digits=5/4 -> 0.0001 (majore cu 4/5 zecimale)
+          - digits=3/2 -> 0.01   (JPY etc.)
+        """
+        info = self.get_symbol_info(symbol)
+        if not info:
+            return 0.0001
+        return 10 ** (-(info.digits - 1))
 
-    @property
-    def TRADE_ACTION_DEAL(self): return mt5.TRADE_ACTION_DEAL
-    @property
-    def TRADE_ACTION_PENDING(self): return mt5.TRADE_ACTION_PENDING
-    @property
-    def TRADE_ACTION_SLTP(self): return mt5.TRADE_ACTION_SLTP
-
-    @property
-    def TRADE_RETCODE_DONE(self): return mt5.TRADE_RETCODE_DONE
-
-    @property
-    def ORDER_FILLING_FOK(self): return mt5.ORDER_FILLING_FOK
-    @property
-    def ORDER_FILLING_RETURN(self): return mt5.ORDER_FILLING_RETURN
-
-    @property
-    def ORDER_TIME_GTC(self): return mt5.ORDER_TIME_GTC
-    @property
-    def ORDER_TIME_SPECIFIED(self): return mt5.ORDER_TIME_SPECIFIED
-
-    @property
-    def TIMEFRAME_M1(self): return mt5.TIMEFRAME_M1
-    @property
-    def TIMEFRAME_M5(self): return mt5.TIMEFRAME_M5
-    @property
-    def TIMEFRAME_H1(self): return mt5.TIMEFRAME_H1
+    # --- shutdown
+    def shutdown(self):
+        if self.mt5:
+            self.mt5.shutdown()
+            self.initialized = False
+            if self.logger:
+                self.logger.log("🛑 MT5 shutdown complete")

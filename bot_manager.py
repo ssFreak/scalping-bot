@@ -1,158 +1,167 @@
+import threading
 import time
-import logging
 import yaml
 import os
-import threading
-from datetime import datetime
+import sys
+import traceback
+import signal
 
+from core.logger import Logger
 from core.mt5_connector import MT5Connector
 from managers.risk_manager import RiskManager
 from managers.trade_manager import TradeManager
-from core.logger import Logger
-
 from strategies.pivot_strategy import PivotStrategy
 from strategies.ma_ribbon_strategy import MARibbonStrategy
 
-
-# === Setup logging ===
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-
-logger = logging.getLogger(__name__)
-
-
 class BotManager:
     def __init__(self, config_path="config/config.yaml"):
-        self.config = self.load_config(config_path)
-        self.symbols = self.config["general"]["symbols_forex"]
-        self.logger = Logger()
+        self.config_path = config_path
+        self.logger = Logger("logs/bot.log")
 
-        # MT5 Connector
+        self.logger.log("🚀 Initializare Scalping Bot...")
+
+        # încarcă config
+        self.config = self._load_config()
+
+        # MT5Connector
         self.mt5 = MT5Connector(self.logger)
         if not self.mt5.initialize():
-            raise RuntimeError("❌ MT5 init failed")
+            self.logger.log("❌ Nu s-a putut inițializa MT5. Ieșire.")
+            sys.exit(1)
 
-        # Managers
-        self.risk_manager = RiskManager(self.config, self.logger, self.mt5)
+        # TradeManager & RiskManager
         self.trade_manager = TradeManager(
-            logger=self.logger,
-            mt5_connector=self.mt5,
-            magic_number=13930,
-            trade_deviation=10,
-            risk_manager=self.risk_manager
+            self.logger,
+            magic_number=123456,
+            trade_deviation=20,
+            mt5=self.mt5,
         )
+        self.risk_manager = RiskManager(self.config["general"], self.logger, self.trade_manager, self.mt5)
 
-        # Strategies
+        # Strategii încărcate
         self.strategies = self._load_strategies()
 
-        # Threading
-        self.strategy_threads = {}
-        self.shutdown_event = threading.Event()
-        self.thread_monitor_interval = 10
-        self.thread_monitor_logging = self.config.get("general", {}).get("thread_monitor_logging", True)
+        # Thread management
+        self.threads = {}
+        self.running = True
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def load_config(self, path):
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Config file not found: {path}")
-        with open(path, "r") as f:
+    def _load_config(self):
+        if not os.path.exists(self.config_path):
+            print(f"Config file not found: {self.config_path}")
+            sys.exit(1)
+        with open(self.config_path, "r") as f:
             return yaml.safe_load(f)
 
     def _load_strategies(self):
-        cfg = self.config["strategies"]
+        strategies_cfg = self.config.get("strategies", {})
         strategies = []
-        for symbol in self.symbols:
-            # ensure symbol is selected
-            self.mt5.symbol_select(symbol, True)
-            if cfg.get("pivot", {}).get("enabled", False):
-                strategies.append(PivotStrategy(symbol, cfg["pivot"], self.logger, self.risk_manager, self.trade_manager, self.mt5))
-            if cfg.get("moving_average_ribbon", {}).get("enabled", False):
-                strategies.append(MARibbonStrategy(symbol, cfg["moving_average_ribbon"], self.logger, self.risk_manager, self.trade_manager, self.mt5))
+
+        for sym in self.config["general"]["symbols_forex"]:
+            # selectăm simbolul în MT5
+            self.mt5.symbol_select(sym, True)
+
+            # Pivot strategy
+            if strategies_cfg.get("pivot", {}).get("enabled", False):
+                strategies.append(
+                    PivotStrategy(
+                        sym,
+                        strategies_cfg["pivot"],
+                        self.logger,
+                        self.risk_manager,
+                        self.trade_manager,
+                        self.mt5
+                    )
+                )
+
+            # MA Ribbon strategy
+            if strategies_cfg.get("moving_average_ribbon", {}).get("enabled", False):
+                strategies.append(
+                    MARibbonStrategy(
+                        sym,
+                        strategies_cfg["moving_average_ribbon"],
+                        self.logger,
+                        self.risk_manager,
+                        self.trade_manager,
+                        self.mt5
+                    )
+                )
+
         return strategies
 
-    def _create_strategy_thread(self, strategy):
-        thread_id = f"{strategy.__class__.__name__}_{strategy.symbol}_{id(strategy)}"
-        stop_event = threading.Event()
-        strategy.stop_event = stop_event
+    def _strategy_thread(self, strategy, name):
+        self.logger.log(f"▶️ Start thread {name}")
+        while self.running:
+            try:
+                if self.risk_manager.can_trade(verbose=True):
+                    strategy.run_once()
+                else:
+                    time.sleep(10)
+                time.sleep(2)
+            except Exception as e:
+                trace = traceback.format_exc()
+                self.logger.log(f"❌ Error in {name}: {e}")
+                self.logger.log(f"🔍 {trace}")
+                time.sleep(5)
+        self.logger.log(f"🛑 Thread stop {name}")
 
-        t = threading.Thread(target=strategy.run_threaded, name=thread_id, daemon=True)
-        self.strategy_threads[thread_id] = {
-            "thread": t,
-            "strategy": strategy,
-            "symbol": strategy.symbol,
-            "stop_event": stop_event,
-            "start_time": datetime.now(),
-            "restart_count": 0,
-        }
-        t.start()
-        self.logger.log(f"🚀 Thread started: {thread_id} (id={t.ident})")
-        return thread_id
+    def start(self):
+        self.logger.log("📈 Pornim strategiile...")
+        for strat in self.strategies:
+            name = f"{strat.__class__.__name__}_{strat.symbol}_{threading.get_ident()}"
+            t = threading.Thread(target=self._strategy_thread, args=(strat, name), daemon=True)
+            self.threads[name] = t
+            t.start()
 
-    def _start_all_strategy_threads(self):
-        for s in self.strategies:
-            self._create_strategy_thread(s)
-        self.logger.log(f"✅ Started {len(self.strategy_threads)} strategy threads")
+        self._monitor_threads()
 
-    def _monitor_threads(self, enable_logging=True):
-        active, dead = [], []
-        for thread_id, info in list(self.strategy_threads.items()):
-            t = info["thread"]
-            if t.is_alive():
-                active.append(thread_id)
-            else:
-                dead.append(thread_id)
-                if enable_logging:
-                    self.logger.log(f"💀 Thread died: {thread_id}")
-                del self.strategy_threads[thread_id]
-                if not self.shutdown_event.is_set():
-                    # restart
-                    s = info["strategy"]
-                    new_id = self._create_strategy_thread(s)
-                    self.strategy_threads[new_id]["restart_count"] = info["restart_count"] + 1
-        return active, dead
+    def _monitor_threads(self):
+        self.logger.log("👀 Monitorizare thread-uri activată")
+        while self.running:
+            for name, thread in list(self.threads.items()):
+                if not thread.is_alive() and self.running:
+                    self.logger.log(f"🔄 Restarting thread: {name}")
+                    parts = name.split("_")
+                    class_name = parts[0]
+                    symbol = parts[1]
+                    # reconstruim strategia
+                    strat = None
+                    if class_name == "PivotStrategy":
+                        strat = PivotStrategy(
+                            symbol,
+                            self.config["strategies"]["pivot"],
+                            self.logger,
+                            self.risk_manager,
+                            self.trade_manager,
+                            self.mt5
+                        )
+                    elif class_name == "MARibbonStrategy":
+                        strat = MARibbonStrategy(
+                            symbol,
+                            self.config["strategies"]["moving_average_ribbon"],
+                            self.logger,
+                            self.risk_manager,
+                            self.trade_manager,
+                            self.mt5
+                        )
 
-    def _stop_all_threads(self):
-        self.logger.log(f"🛑 Stopping {len(self.strategy_threads)} threads...")
-        for info in self.strategy_threads.values():
-            info["stop_event"].set()
-        for thread_id, info in self.strategy_threads.items():
-            info["thread"].join(timeout=15)
-            self.logger.log(f"✅ Stopped {thread_id}")
-        self.strategy_threads.clear()
+                    if strat:
+                        new_name = f"{class_name}_{symbol}_{threading.get_ident()}"
+                        t = threading.Thread(target=self._strategy_thread, args=(strat, new_name), daemon=True)
+                        self.threads[new_name] = t
+                        t.start()
+                        del self.threads[name]
+            time.sleep(10)
 
-    def run(self):
-        logger.info("🚀 Bot starting...")
-        try:
-            self._start_all_strategy_threads()
-            cycle = 0
-            while not self.shutdown_event.is_set():
-                cycle += 1
-                logger.info(f"🔄 === Monitor Cycle {cycle} ===")
-
-                _ = self.risk_manager.can_trade(verbose=True)
-                active, dead = self._monitor_threads(self.thread_monitor_logging)
-                logger.info(f"🧵 Active={len(active)}, Dead={len(dead)}")
-                if dead:
-                    for d in dead:
-                        logger.info(f"   - restarted {d}")
-
-                if self.shutdown_event.wait(timeout=self.thread_monitor_interval):
-                    break
-        except KeyboardInterrupt:
-            logger.info("🛑 KeyboardInterrupt")
-        finally:
-            logger.info("🏁 Shutting down...")
-            self.shutdown_event.set()
-            self._stop_all_threads()
-            self.mt5.shutdown()
-            logger.info("✅ Bot stopped.")
-
+    def _signal_handler(self, sig, frame):
+        self.logger.log("🛑 Stop primit, închidem bot-ul...")
+        self.running = False
+        for name, thread in self.threads.items():
+            thread.join(timeout=2)
+        self.mt5.shutdown()
+        sys.exit(0)
 
 if __name__ == "__main__":
     bot = BotManager("config/config.yaml")
-    bot.run()
+    bot.start()

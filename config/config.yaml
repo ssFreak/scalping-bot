@@ -1,8 +1,9 @@
 # ==========================
-# Configurație Scalping Bot (robust)
+# Configurație Scalping Bot
 # ==========================
 
 general:
+  # Lista de simboluri Forex pe care se va tranzacționa
   symbols_forex:
     - GBPUSD
     - USDCHF
@@ -16,34 +17,33 @@ general:
     - CHFJPY
     - EURUSD
 
-  # Ținte zilnice
-  daily_profit: 750.0         # plafon profit (oprește trading la atingere)
-  daily_loss: -250.0          # poate fi introdus și pozitiv (250.0) – codul forțează semn negativ
+  # Ținta de profit zilnică totală pentru toate simbolurile combinate.
+  daily_profit: 750.0
+  daily_loss: -250.0
 
-  # Control risc
-  fixed_lot_size: 0.1       # volum fix mic (Pasul 1)
-  max_position_lot: 0.3
-  min_free_margin_ratio: 0.6  # 60%
-  max_trades_per_day: 25      # (Pasul 3)
-  max_daily_drawdown: 0.05    # 5% din equity-ul zilei (Pasul 4)
-  one_position_per_symbol: true
-  cooldown_minutes: 3         # pauză minimă între trade-uri pe același simbol
+  # Parametri de risk management
+  risk_per_trade: 0.02        # 2% risc per tranzacție
+  max_position_lot: 0.3       # limită lot maxim per poziție
+  min_free_margin_ratio: 0.6  # marjă liberă minimă 60%
 
-  # Thread monitoring
+  # Trailing stop global (VALORI ÎN PIPS)
+  trailing:
+    be_min_profit_pips: 10    # activează break-even după +10 pips
+    step_pips: 5              # update SL doar dacă mutarea depășește 5 pips
+    atr_multiplier: 1.5       # trailing = 1.5 * ATR(M5) (în preț)
+
+  # Thread monitoring configuration
   thread_monitor_logging: true
 
+# ==========================
+# Configurația strategiilor
+# ==========================
 strategies:
   pivot:
     enabled: true
     timeframe: M1
+    atr_multiplier: 2.5       # multiplicator ATR pentru calcul SL (ATR este în preț)
     atr_period: 14
-    atr_multiplier: 2.5
-    min_atr_points: 25        # Filtru ATR în puncte (nu în preț)
-    rsi_period: 14
-    macd_fast: 12
-    macd_slow: 26
-    macd_signal: 9
-    ts_atr_multiplier: 1.0    # TrailingStop ~ 1*ATR
 
   moving_average_ribbon:
     enabled: true
@@ -52,9 +52,14 @@ strategies:
     atr_period: 14
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.5
-    min_atr_points: 60        # M5 are range mai mare
+
+  momentum_scalping:
+    enabled: false
+    timeframe: M1
     rsi_period: 14
     macd_fast: 12
     macd_slow: 26
     macd_signal: 9
-    ts_atr_multiplier: 1.0
+    atr_period: 14
+    tp_atr_multiplier: 1.5
+    sl_atr_multiplier: 2.0

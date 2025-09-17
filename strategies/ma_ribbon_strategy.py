@@ -3,94 +3,96 @@ import traceback
 
 from strategies.base_strategy import BaseStrategy
 from core.utils import calculate_atr
-from core.indicators import calculate_rsi_wilder, calculate_macd
 
 
 class MARibbonStrategy(BaseStrategy):
     def __init__(self, symbol, config, logger, risk_manager, trade_manager, mt5_connector):
         super().__init__(symbol, config, logger, risk_manager, trade_manager, mt5_connector)
-        self.sma_periods = config.get("sma_periods", [5, 8, 13])
-        self.atr_period = config.get("atr_period", 14)
-        self.tp_atr_multiplier = config.get("tp_atr_multiplier", 1.5)
-        self.sl_atr_multiplier = config.get("sl_atr_multiplier", 2.5)
-        self.timeframe = self.mt5.get_timeframe(config.get("timeframe", "M5"))
-        self.trade_manager.set_trailing_timeframe(self.symbol, self.timeframe)
-        self.min_atr_points = config.get("min_atr_points", 60)
-        self.rsi_period = config.get("rsi_period", 14)
-        self.macd_fast = config.get("macd_fast", 12)
-        self.macd_slow = config.get("macd_slow", 26)
-        self.macd_signal = config.get("macd_signal", 9)
-        self.ts_atr_multiplier = config.get("ts_atr_multiplier", 1.0)
+        self.sma_periods = list(config.get('sma_periods', [5, 8, 13]))
+        self.atr_period = int(config.get('atr_period', 14))
+        self.tp_atr_multiplier = float(config.get('tp_atr_multiplier', 1.5))
+        self.sl_atr_multiplier = float(config.get('sl_atr_multiplier', 2.5))
+        tf_str = config.get('timeframe', 'M5')
+        self.timeframe = self.mt5.get_timeframe(tf_str)
 
-    def _calculate_sma(self, df):
-        for p in self.sma_periods:
-            df[f"SMA_{p}"] = df["close"].rolling(window=p, min_periods=1).mean()
+    def _calculate_sma(self, df: pd.DataFrame):
+        for period in self.sma_periods:
+            df[f'SMA_{period}'] = df['close'].rolling(window=period, min_periods=1).mean()
         return df
 
-    def _ribbon_signal(self, df):
-        sma_5, sma_8, sma_13 = float(df["SMA_5"].iloc[-1]), float(df["SMA_8"].iloc[-1]), float(df["SMA_13"].iloc[-1])
-        point_val = self.mt5.get_symbol_info(self.symbol).point
-        if sma_5 > sma_8 > sma_13 and (sma_5 - sma_8 > 0.5 * point_val) and (sma_8 - sma_13 > 0.5 * point_val):
+    def generate_signal(self, df: pd.DataFrame):
+        df = self._calculate_sma(df)
+
+        s5 = float(df['SMA_5'].iloc[-1])
+        s8 = float(df['SMA_8'].iloc[-1])
+        s13 = float(df['SMA_13'].iloc[-1])
+
+        info = self.mt5.get_symbol_info(self.symbol)
+        point_val = getattr(info, 'point', 0.00001) if info else 0.00001
+
+        # BUY dacă ribbon-ul este aliniat și separația e minimă
+        if s5 > s8 > s13 and (s5 - s8) > 0.5 * point_val and (s8 - s13) > 0.5 * point_val:
             return "BUY"
-        if sma_5 < sma_8 < sma_13 and (sma_8 - sma_5 > 0.5 * point_val) and (sma_13 - sma_8 > 0.5 * point_val):
+
+        # SELL dacă ribbon-ul este aliniat invers și separația e minimă
+        if s5 < s8 < s13 and (s8 - s5) > 0.5 * point_val and (s13 - s8) > 0.5 * point_val:
             return "SELL"
+
         return None
 
     def run_once(self, symbol=None):
         sym = symbol or self.symbol
         try:
-            count = max(self.sma_periods) + self.atr_period + 10
+            if not self.risk_manager.can_trade(verbose=False):
+                return
+
+            count = max(self.sma_periods) + self.atr_period + 5
+
+            # === rates ===
             rates = self.mt5.get_rates(sym, self.timeframe, count)
-            if rates is None or len(rates) < count - 5:
+            if rates is None:
+                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): rates is None")
                 return
+            if hasattr(rates, "__len__") and len(rates) == 0:
+                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): rates.length == 0")
+                return
+
             df = pd.DataFrame(rates)
+            if df.empty:
+                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): DataFrame is empty")
+                return
 
+            # === ATR în PREȚ ===
             df = calculate_atr(df, self.atr_period)
-            df = calculate_rsi_wilder(df, self.rsi_period)
-            df = calculate_macd(df, self.macd_fast, self.macd_slow, self.macd_signal)
-            df = self._calculate_sma(df)
+            atr_price = float(df['atr'].iloc[-1])
 
-            symbol_info = self.mt5.get_symbol_info(sym)
-            if not symbol_info:
-                return
-            point = symbol_info.point
-            atr = float(df["atr"].iloc[-1])
-            atr_points = atr / point
-            if atr_points < self.min_atr_points:
+            pip = self.mt5.get_pip_size(sym)
+            if pip <= 0.0:
+                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): pip size invalid")
                 return
 
-            rsi = float(df["rsi"].iloc[-1])
-            macd = float(df["macd"].iloc[-1])
-            macd_sig = float(df["macd_signal"].iloc[-1])
-
-            signal = self._ribbon_signal(df)
-            if not signal:
+            atr_pips = atr_price / pip
+            if atr_pips <= 0.0:
+                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): ATR pips invalid ({atr_pips:.2f})")
                 return
 
-            # RSI filter
-            if 40 <= rsi <= 60:
-                return
-            if signal == "BUY" and rsi <= 60:
-                return
-            if signal == "SELL" and rsi >= 40:
+            # === Semnal ===
+            signal = self.generate_signal(df)
+            if signal is None:
                 return
 
-            # MACD filter
-            if signal == "BUY" and not (macd > macd_sig):
-                return
-            if signal == "SELL" and not (macd < macd_sig):
-                return
-
-            entry = float(df["close"].iloc[-1])
+            entry = float(df['close'].iloc[-1])
             if signal == "BUY":
-                sl = entry - self.sl_atr_multiplier * atr
-                tp = entry + self.tp_atr_multiplier * atr
+                sl = entry - self.sl_atr_multiplier * atr_price
+                tp = entry + self.tp_atr_multiplier * atr_price
             else:
-                sl = entry + self.sl_atr_multiplier * atr
-                tp = entry - self.tp_atr_multiplier * atr
+                sl = entry + self.sl_atr_multiplier * atr_price
+                tp = entry - self.tp_atr_multiplier * atr_price
 
-            lot = self.risk_manager.get_lot_size(sym, entry, sl)
-            if lot <= 0 or not self.risk_manager.check_free_margin(lot, sym):
+            lot = self.risk_manager.calculate_lot_size(sym, signal, entry, sl)
+            if lot <= 0.0:
+                return
+            if not self.risk_manager.check_free_margin():
                 return
 
             ok = self.trade_manager.open_trade(sym, signal, lot, entry, sl, tp)
@@ -98,5 +100,6 @@ class MARibbonStrategy(BaseStrategy):
                 self.trade_manager.manage_trailing_stop(sym)
 
         except Exception as e:
-            self.logger.log(f"❌ Error in MARibbonStrategy {sym}: {e}")
-            self.logger.log(f"🔍 {traceback.format_exc()}")
+            trace = traceback.format_exc()
+            self.logger.log(f"❌ Error in {self.__class__.__name__} {sym}: {e}")
+            self.logger.log(f"🔍 {trace}")
