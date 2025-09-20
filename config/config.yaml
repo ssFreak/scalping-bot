@@ -18,22 +18,24 @@ general:
     - EURUSD
 
   # Ținta de profit zilnică totală pentru toate simbolurile combinate.
-  daily_profit: 750.0
+  daily_profit: 150.0
   daily_loss: -250.0
 
-  # Parametri de risk management
+  # Parametrii de risk management
   risk_per_trade: 0.02        # 2% risc per tranzacție
-  max_position_lot: 0.3       # limită lot maxim per poziție
-  min_free_margin_ratio: 0.6  # marjă liberă minimă 60%
+  max_position_lot: 0.3       # Limită lot maxim per poziție
+  min_free_margin_ratio: 0.6  # Marjă liberă minimă 60%
 
-  # Trailing stop global (VALORI ÎN PIPS)
-  trailing:
-    be_min_profit_pips: 10    # activează break-even după +10 pips
-    step_pips: 5              # update SL doar dacă mutarea depășește 5 pips
-    atr_multiplier: 1.5       # trailing = 1.5 * ATR(M5) (în preț)
+  # Trailing stop global (activat la acest prag de profit, în pips)
+  trailing_profit_threshold: 15.0
 
   # Thread monitoring configuration
   thread_monitor_logging: true
+
+  # Orele de sesiuni (ora României)
+  session_hours:
+    - ["10:00", "19:00"]   # Londra
+    - ["14:00", "23:00"]   # New York
 
 # ==========================
 # Configurația strategiilor
@@ -42,8 +44,13 @@ strategies:
   pivot:
     enabled: true
     timeframe: M1
-    atr_multiplier: 2.5       # multiplicator ATR pentru calcul SL (ATR este în preț)
+    atr_multiplier: 2.5
+    pivot_levels: [S1, R1]
     atr_period: 14
+    min_atr_pips: 5
+    volume_lookback: 20
+    min_volume_multiplier: 1.2
+    cooldown_minutes: 5
 
   moving_average_ribbon:
     enabled: true
@@ -52,6 +59,10 @@ strategies:
     atr_period: 14
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.5
+    min_atr_pips: 5
+    volume_lookback: 20
+    min_volume_multiplier: 1.2
+    cooldown_minutes: 5
 
   momentum_scalping:
     enabled: false
@@ -63,3 +74,23 @@ strategies:
     atr_period: 14
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.0
+   
+  ema_breakout:
+    enabled: true
+    ema_periods: [8, 13, 21]
+    offset_pips: 3
+    order_expiry_minutes: 60
+    min_atr_pips: 5
+    rr_dynamic: true
+
+  ema_crossover:
+    enabled: false
+
+  ema_rsi_filter:
+    enabled: false
+
+  linear_regression:
+    enabled: false
+
+  rmi_supertrend:
+    enabled: false

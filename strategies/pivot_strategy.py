@@ -1,98 +1,93 @@
 import pandas as pd
 import traceback
+from datetime import datetime, timedelta
 
 from strategies.base_strategy import BaseStrategy
-from core.utils import calculate_atr
-
 
 class PivotStrategy(BaseStrategy):
-    def __init__(self, symbol, config, logger, risk_manager, trade_manager, mt5_connector):
-        # mt5_connector este folosit ca self.mt5 în BaseStrategy
-        super().__init__(symbol, config, logger, risk_manager, trade_manager, mt5_connector)
-        self.atr_period = int(config.get("atr_period", 14))
-        self.atr_multiplier = float(config.get("atr_multiplier", 2.5))
-        tf_str = config.get("timeframe", "M1")
-        self.timeframe = self.mt5.get_timeframe(tf_str)
+    def __init__(self, symbol, config, logger, risk_manager, trade_manager, mt5):
+        super().__init__(symbol, config, logger, risk_manager, trade_manager, mt5)
 
-    def generate_signal(self, df: pd.DataFrame):
-        high = float(df["high"].iloc[-1])
-        low = float(df["low"].iloc[-1])
-        close = float(df["close"].iloc[-1])
+        self.timeframe = self.mt5.get_timeframe(config.get("timeframe", "M1"))
+        self.atr_period = config.get("atr_period", 14)
+        self.atr_multiplier = config.get("atr_multiplier", 2.5)
+        self.trailing_cfg = config.get("trailing", {})
 
-        pivot = (high + low + close) / 3.0
-        r1 = 2 * pivot - low
-        s1 = 2 * pivot - high
+        # Noile filtre
+        self.volume_lookback = config.get("volume_lookback", 20)
+        self.min_volume_multiplier = config.get("min_volume_multiplier", 1.2)
+        self.cooldown_minutes = config.get("cooldown_minutes", 5)
+        self.last_trade_time = None
 
-        if close <= s1:
-            return "BUY", pivot
-        elif close >= r1:
-            return "SELL", pivot
-        return None, None
-
-    def run_once(self, symbol=None):
-        sym = symbol or self.symbol
+    def run_once(self):
         try:
-            # Respectăm blocajele de risk
-            if not self.risk_manager.can_trade(verbose=False):
-                return
-
-            # === rates ===
-            rates = self.mt5.get_rates(sym, self.timeframe, 200)
-            if rates is None:
-                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): rates is None")
-                return
-            # numpy array/list explicit
-            if hasattr(rates, "__len__") and len(rates) < 50:
-                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): rates too few: {len(rates)}")
+            rates = self.mt5.get_rates(self.symbol, self.timeframe, 200)
+            if rates is None or len(rates) < 50:
                 return
 
             df = pd.DataFrame(rates)
-            if df.empty:
-                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): DataFrame is empty")
-                return
+            df["atr"] = self._calculate_atr(df, self.atr_period)
 
-            # === ATR în PREȚ (nu points) ===
-            df = calculate_atr(df, self.atr_period)
+            # === Filtru ATR minim ===
             atr_price = float(df["atr"].iloc[-1])
-
-            pip = self.mt5.get_pip_size(sym)
-            if pip <= 0.0:
-                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): pip size invalid")
-                return
-
+            min_atr_pips = self.config.get("min_atr_pips", 5)
+            pip = self.mt5.get_pip_size(self.symbol)
             atr_pips = atr_price / pip
-            if atr_pips <= 0.0:
-                self.logger.log(f"⚠️ {self.__class__.__name__}({sym}): ATR pips invalid ({atr_pips:.2f})")
+            if atr_pips < min_atr_pips:
                 return
 
-            # === Semnal ===
-            signal, tp_level = self.generate_signal(df)
-            if signal is None:
+            # === Filtru volum ===
+            if len(df) >= self.volume_lookback + 1:
+                recent_vol = df["tick_volume"].iloc[-1]
+                avg_vol = df["tick_volume"].iloc[-self.volume_lookback-1:-1].mean()
+                if recent_vol < self.min_volume_multiplier * avg_vol:
+                    return
+
+            # === Cooldown ===
+            if self.last_trade_time:
+                if datetime.now() < self.last_trade_time + timedelta(minutes=self.cooldown_minutes):
+                    return
+
+            # === Confirmare trend H1 (EMA) ===
+            if not self._confirm_trend():
                 return
 
-            entry = float(df["close"].iloc[-1])
+            entry_price = float(df["close"].iloc[-1])
+            sl = entry_price - self.atr_multiplier * atr_price
+            tp = entry_price + self._dynamic_rr(atr_pips) * (entry_price - sl)
 
-            # SL din multipli ATR (ATR este în preț, multiplicatorul rămâne dimensionless)
-            if signal == "BUY":
-                sl = entry - self.atr_multiplier * atr_price
-            else:
-                sl = entry + self.atr_multiplier * atr_price
+            lot = self.risk_manager.calculate_lot_size(self.symbol, "BUY", entry_price, sl)
+            if lot > 0 and self.risk_manager.check_free_margin():
+                self.trade_manager.open_trade(self.symbol, "BUY", lot, entry_price, sl, tp)
+                self.last_trade_time = datetime.now()
 
-            # TP = nivel pivot returnat din generate_signal
-            tp = float(tp_level)
-
-            # === Risk & Open ===
-            lot = self.risk_manager.calculate_lot_size(sym, signal, entry, sl)
-            if lot <= 0.0:
-                return
-            if not self.risk_manager.check_free_margin():
-                return
-
-            ok = self.trade_manager.open_trade(sym, signal, lot, entry, sl, tp)
-            if ok:
-                self.trade_manager.manage_trailing_stop(sym)
-
+            self._manage_trailing()
         except Exception as e:
-            trace = traceback.format_exc()
-            self.logger.log(f"❌ Error in {self.__class__.__name__} {sym}: {e}")
-            self.logger.log(f"🔍 {trace}")
+            self.logger.log(f"❌ Error in PivotStrategy {self.symbol}: {e}")
+            self.logger.log(traceback.format_exc())
+
+    def _calculate_atr(self, df, period):
+        high_low = df["high"] - df["low"]
+        high_close = (df["high"] - df["close"].shift()).abs()
+        low_close = (df["low"] - df["close"].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        return tr.rolling(period).mean()
+
+    def _dynamic_rr(self, atr_pips):
+        return min(3, max(1, atr_pips / 10))
+
+    def _confirm_trend(self):
+        tf_h1 = self.mt5.get_timeframe("H1")
+        rates = self.mt5.get_rates(self.symbol, tf_h1, 200)
+        if rates is None or len(rates) < 50:
+            return True
+        df = pd.DataFrame(rates)
+        df["ema8"] = df["close"].ewm(span=8).mean()
+        df["ema21"] = df["close"].ewm(span=21).mean()
+        return df["ema8"].iloc[-1] > df["ema21"].iloc[-1]
+
+    def _manage_trailing(self):
+        positions = self.mt5.positions_get(symbol=self.symbol)
+        if not positions:
+            return
+        self.trade_manager.manage_trailing_stop(self.symbol)

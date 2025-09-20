@@ -1,166 +1,160 @@
 import threading
 import time
-import yaml
-import os
-import sys
-import traceback
 import signal
+import sys
+import yaml
+from datetime import datetime
 
-from core.logger import Logger
 from core.mt5_connector import MT5Connector
-from managers.risk_manager import RiskManager
 from managers.trade_manager import TradeManager
+from managers.risk_manager import RiskManager
+from core.logger import Logger
+
+# Strategii
 from strategies.pivot_strategy import PivotStrategy
 from strategies.ma_ribbon_strategy import MARibbonStrategy
+from strategies.ema_breakout_strategy import EMABreakoutStrategy
+
 
 class BotManager:
     def __init__(self, config_path="config/config.yaml"):
-        self.config_path = config_path
-        self.logger = Logger("logs/bot.log")
-
+        self.logger = Logger("bot.log")
         self.logger.log("🚀 Initializare Scalping Bot...")
 
-        # încarcă config
-        self.config = self._load_config()
+        # Load config
+        with open(config_path, "r") as f:
+            self.config = yaml.safe_load(f)
 
-        # MT5Connector
+        # === Conexiune MT5 ===
         self.mt5 = MT5Connector(self.logger)
         if not self.mt5.initialize():
-            self.logger.log("❌ Nu s-a putut inițializa MT5. Ieșire.")
+            self.logger.log("❌ Nu s-a putut inițializa conexiunea MT5.")
             sys.exit(1)
+        
+        # === Manageri ===
+        self.trade_manager = TradeManager(self.config, self.logger, None, self.mt5)
+        self.risk_manager = RiskManager(self.config, self.logger, self.trade_manager, self.mt5)
+        
+        # Injectăm risk_manager înapoi în trade_manager
+        self.trade_manager.risk_manager = self.risk_manager
 
-        # TradeManager & RiskManager
-        self.trade_manager = TradeManager(
-            self.logger,
-            magic_number=123456,
-            trade_deviation=20,
-            mt5=self.mt5,
-        )
-        self.risk_manager = RiskManager(self.config["general"], self.logger, self.trade_manager, self.mt5)
+        # Threads
+        self.threads = {}
+        self.stop_event = threading.Event()
 
-        # Strategii încărcate
+        # Strategii
         self.strategies = self._load_strategies()
 
-        # Thread management
-        self.threads = {}
-        self.running = True
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
-    def _load_config(self):
-        if not os.path.exists(self.config_path):
-            print(f"Config file not found: {self.config_path}")
-            sys.exit(1)
-        with open(self.config_path, "r") as f:
-            return yaml.safe_load(f)
-
     def _load_strategies(self):
-        strategies_cfg = self.config.get("strategies", {})
         strategies = []
+        forex_symbols = self.config["general"]["symbols_forex"]
 
-        for sym in self.config["general"]["symbols_forex"]:
-            # selectăm simbolul în MT5
-            self.mt5.symbol_select(sym, True)
-
-            # Pivot strategy
-            if strategies_cfg.get("pivot", {}).get("enabled", False):
+        for symbol in forex_symbols:
+            # Pivot Strategy
+            if self.config["strategies"]["pivot"].get("enabled", False):
                 strategies.append(
                     PivotStrategy(
-                        sym,
-                        strategies_cfg["pivot"],
+                        symbol,
+                        self.config["strategies"]["pivot"],
                         self.logger,
                         self.risk_manager,
                         self.trade_manager,
-                        self.mt5
+                        self.mt5,
                     )
                 )
 
-            # MA Ribbon strategy
-            if strategies_cfg.get("moving_average_ribbon", {}).get("enabled", False):
+            # MA Ribbon Strategy
+            if self.config["strategies"]["moving_average_ribbon"].get("enabled", False):
                 strategies.append(
                     MARibbonStrategy(
-                        sym,
-                        strategies_cfg["moving_average_ribbon"],
+                        symbol,
+                        self.config["strategies"]["moving_average_ribbon"],
                         self.logger,
                         self.risk_manager,
                         self.trade_manager,
-                        self.mt5
+                        self.mt5,
+                    )
+                )
+
+            # EMA Breakout Strategy (nouă)
+            if self.config["strategies"].get("ema_breakout", {}).get("enabled", False):
+                strategies.append(
+                    EMABreakoutStrategy(
+                        symbol,
+                        self.config["strategies"]["ema_breakout"],
+                        self.logger,
+                        self.risk_manager,
+                        self.trade_manager,
+                        self.mt5,
                     )
                 )
 
         return strategies
 
-    def _strategy_thread(self, strategy, name):
-        self.logger.log(f"▶️ Start thread {name}")
-        while self.running:
+    def _strategy_thread(self, strategy):
+        """Rulează o strategie într-un thread separat."""
+        sym = strategy.symbol
+        name = strategy.__class__.__name__
+
+        self.logger.log(f"▶️ Start {name} pentru {sym}")
+
+        while not self.stop_event.is_set():
             try:
-                if self.risk_manager.can_trade(verbose=True):
+                if self.risk_manager.can_trade(verbose=False):
                     strategy.run_once()
                 else:
-                    time.sleep(10)
-                time.sleep(2)
+                    time.sleep(10)  # Dacă nu putem tranzacționa, luăm o pauză
             except Exception as e:
-                trace = traceback.format_exc()
-                self.logger.log(f"❌ Error in {name}: {e}")
-                self.logger.log(f"🔍 {trace}")
-                time.sleep(5)
-        self.logger.log(f"🛑 Thread stop {name}")
+                self.logger.log(f"❌ Eroare în {name} {sym}: {e}")
+            time.sleep(5)  # Delay între iterații
+
+        self.logger.log(f"🛑 Oprit {name} pentru {sym}")
 
     def start(self):
-        self.logger.log("📈 Pornim strategiile...")
+        """Pornește toate strategiile."""
         for strat in self.strategies:
-            name = f"{strat.__class__.__name__}_{strat.symbol}_{threading.get_ident()}"
-            t = threading.Thread(target=self._strategy_thread, args=(strat, name), daemon=True)
-            self.threads[name] = t
+            t = threading.Thread(target=self._strategy_thread, args=(strat,), daemon=True)
+            self.threads[strat.symbol + "_" + strat.__class__.__name__] = t
             t.start()
+            time.sleep(1)
 
-        self._monitor_threads()
+        self.logger.log("✅ Toate strategiile au fost pornite.")
+
+        # Thread monitor
+        monitor = threading.Thread(target=self._monitor_threads, daemon=True)
+        monitor.start()
+
+        # Signal handling
+        signal.signal(signal.SIGINT, self.stop)
+        signal.signal(signal.SIGTERM, self.stop)
+
+        while not self.stop_event.is_set():
+            time.sleep(1)
 
     def _monitor_threads(self):
-        self.logger.log("👀 Monitorizare thread-uri activată")
-        while self.running:
-            for name, thread in list(self.threads.items()):
-                if not thread.is_alive() and self.running:
-                    self.logger.log(f"🔄 Restarting thread: {name}")
-                    parts = name.split("_")
-                    class_name = parts[0]
-                    symbol = parts[1]
-                    # reconstruim strategia
-                    strat = None
-                    if class_name == "PivotStrategy":
-                        strat = PivotStrategy(
-                            symbol,
-                            self.config["strategies"]["pivot"],
-                            self.logger,
-                            self.risk_manager,
-                            self.trade_manager,
-                            self.mt5
-                        )
-                    elif class_name == "MARibbonStrategy":
-                        strat = MARibbonStrategy(
-                            symbol,
-                            self.config["strategies"]["moving_average_ribbon"],
-                            self.logger,
-                            self.risk_manager,
-                            self.trade_manager,
-                            self.mt5
-                        )
+        """Monitorizează thread-urile și le restartează dacă se opresc."""
+        while not self.stop_event.is_set():
+            for key, t in list(self.threads.items()):
+                if not t.is_alive():
+                    self.logger.log(f"🔄 Restart thread: {key}")
+                    parts = key.split("_")
+                    sym = parts[0]
+                    strat_name = parts[1]
+                    for strat in self.strategies:
+                        if strat.symbol == sym and strat.__class__.__name__ == strat_name:
+                            nt = threading.Thread(target=self._strategy_thread, args=(strat,), daemon=True)
+                            self.threads[key] = nt
+                            nt.start()
+                            break
+            time.sleep(30)
 
-                    if strat:
-                        new_name = f"{class_name}_{symbol}_{threading.get_ident()}"
-                        t = threading.Thread(target=self._strategy_thread, args=(strat, new_name), daemon=True)
-                        self.threads[new_name] = t
-                        t.start()
-                        del self.threads[name]
-            time.sleep(10)
-
-    def _signal_handler(self, sig, frame):
-        self.logger.log("🛑 Stop primit, închidem bot-ul...")
-        self.running = False
-        for name, thread in self.threads.items():
-            thread.join(timeout=2)
-        self.mt5.shutdown()
+    def stop(self, *args):
+        """Oprire bot."""
+        self.logger.log("🛑 Oprire Scalping Bot...")
+        self.stop_event.set()
+        time.sleep(2)
         sys.exit(0)
+
 
 if __name__ == "__main__":
     bot = BotManager("config/config.yaml")
