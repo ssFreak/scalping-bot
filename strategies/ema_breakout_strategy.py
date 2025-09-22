@@ -19,14 +19,21 @@ class EMABreakoutStrategy(BaseStrategy):
         self.min_atr_pips = config.get("min_atr_pips", 5)
         self.rr_dynamic = config.get("rr_dynamic", True)
 
+        # New bar gating
+        self.last_bar_time = None
+
     def _calculate_ema(self, df):
         for p in self.ema_periods:
             df[f"ema_{p}"] = df["close"].ewm(span=p).mean()
         return df
 
     def _check_trend_h1(self):
-        df = self.mt5.get_rates(self.symbol, self.timeframe_h1, 200)
-        if df is None or df.empty:
+        rates = self.mt5.get_rates(self.symbol, self.timeframe_h1, 200)
+        if rates is None or len(rates) == 0:
+            return "FLAT"
+
+        df = pd.DataFrame(rates)
+        if df.empty:
             return "FLAT"
 
         df = self._calculate_ema(df)
@@ -44,13 +51,23 @@ class EMABreakoutStrategy(BaseStrategy):
             if trend == "FLAT":
                 return
 
-            df = self.mt5.get_rates(self.symbol, self.timeframe_m5, 50)
-            if df is None or df.empty or len(df) < 10:
+            rates = self.mt5.get_rates(self.symbol, self.timeframe_m5, 50)
+            if rates is None or len(rates) < 10:
                 return
+
+            df = pd.DataFrame(rates)
+            if df.empty:
+                return
+
+            # New bar gating
+            current_bar_time = df["time"].iloc[-1]
+            if self.last_bar_time == current_bar_time:
+                return
+            self.last_bar_time = current_bar_time
 
             df = calculate_atr(df, 14)
             atr_pips = df["atr"].iloc[-1] / self.mt5.get_pip_size(self.symbol)
-            if atr_pips < self.min_atr_pips:
+            if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
                 self.logger.log(f"🔍 {self.symbol} ATR prea mic ({atr_pips:.2f} pips) → skip")
                 return
 
@@ -87,19 +104,20 @@ class EMABreakoutStrategy(BaseStrategy):
                 "price": entry,
                 "sl": sl,
                 "tp": tp,
-                "deviation": 20,
-                "magic": 445566,
+                "deviation": 50,
+                "magic": 13931993,
                 "comment": "EMA Breakout strategy",
                 "type_time": self.mt5.ORDER_TIME_SPECIFIED,
                 "expiration": expiration,
                 "type_filling": self.mt5.ORDER_FILLING_RETURN,
             }
 
-            result = self.mt5.order_send(request)
-            if result and result.retcode == 10009:  # TRADE_RETCODE_DONE
-                self.logger.log(f"✅ Pending order {trend} {self.symbol} plasat @ {entry}")
+            result = self.trade_manager.safe_order_send(request, f"pending {trend} {self.symbol}")
+            if result is None:
+                self.logger.log(f"❌ order_send returned None → simbol inactiv sau conexiune pierdută")
             else:
-                self.logger.log(f"❌ Eroare plasare order {self.symbol}: {result}")
+                self.logger.log(f"🔍 OrderSend result: retcode={result.retcode}, comment={getattr(result, 'comment', '')}")
+                self.logger.log(f"🔍 Full request: {request}")
 
         except Exception as e:
             trace = traceback.format_exc()

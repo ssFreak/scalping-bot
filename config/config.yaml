@@ -16,6 +16,19 @@ general:
     - NZDCAD
     - CHFJPY
     - EURUSD
+    
+  atr_thresholds_pips:
+    EURUSD: 4.5   # (4+5)/2
+    GBPUSD: 6.5   # (6+7)/2
+    USDCHF: 3.5   # (3+4)/2
+    USDCAD: 4.5   # (4+5)/2
+    NZDUSD: 3.5   # (3+4)/2
+    EURGBP: 3.5   # (3+4)/2
+    EURCAD: 5.5   # (5+6)/2
+    GBPAUD: 8.0   # (7+9)/2
+    AUDJPY: 6.5   # (6+7)/2
+    NZDCAD: 3.5   # (3+4)/2
+    CHFJPY: 4.5   # (4+5)/2
 
   # Ținta de profit zilnică totală pentru toate simbolurile combinate.
   daily_profit: 150.0
@@ -25,6 +38,7 @@ general:
   risk_per_trade: 0.02        # 2% risc per tranzacție
   max_position_lot: 0.3       # Limită lot maxim per poziție
   min_free_margin_ratio: 0.6  # Marjă liberă minimă 60%
+  deviation: 5
 
   # Trailing stop global (activat la acest prag de profit, în pips)
   trailing_profit_threshold: 15.0

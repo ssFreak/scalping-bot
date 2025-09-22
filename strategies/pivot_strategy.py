@@ -33,7 +33,7 @@ class PivotStrategy(BaseStrategy):
             min_atr_pips = self.config.get("min_atr_pips", 5)
             pip = self.mt5.get_pip_size(self.symbol)
             atr_pips = atr_price / pip
-            if atr_pips < min_atr_pips:
+            if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
                 return
 
             # === Filtru volum ===

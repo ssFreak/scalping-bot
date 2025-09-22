@@ -12,6 +12,12 @@ class MT5Connector:
             ok = mt5.initialize(login=login, password=password, server=server)
         else:
             ok = mt5.initialize()
+            
+        self.ORDER_TYPE_BUY_STOP = mt5.ORDER_TYPE_BUY_STOP
+        self.ORDER_TYPE_SELL_STOP = mt5.ORDER_TYPE_SELL_STOP
+        self.TRADE_ACTION_PENDING = mt5.TRADE_ACTION_PENDING
+        self.ORDER_TIME_SPECIFIED = mt5.ORDER_TIME_SPECIFIED
+        self.ORDER_FILLING_RETURN = mt5.ORDER_FILLING_RETURN
 
         if not ok:
             if self.logger:

@@ -37,7 +37,7 @@ class MARibbonStrategy(BaseStrategy):
             atr_pips = atr_price / pip
 
             # === Filtru ATR minim ===
-            if atr_pips < self.config.get("min_atr_pips", 5):
+            if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
                 return
 
             # === Filtru volum ===

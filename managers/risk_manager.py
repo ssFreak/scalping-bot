@@ -23,6 +23,7 @@ class RiskManager:
         self.sessions = general_cfg.get("session_hours", [])
         self.min_atr_pips = float(config.get("min_atr_pips", 5))
         self._last_can_trade_log_ts = 0.0
+        self.atr_thresholds = general_cfg.get("atr_thresholds_pips", {})
 
         # trailing (dacă există în config)
         trailing_cfg = config.get("trailing", {})
@@ -247,3 +248,7 @@ class RiskManager:
 
     def get_trailing_params(self):
         return self.trailing_params
+        
+    def get_atr_threshold(self, symbol: str) -> float:
+        """Returnează pragul ATR în pips pentru simbolul dat"""
+        return float(self.atr_thresholds.get(symbol, 5.0))  # fallback default = 5 pips
