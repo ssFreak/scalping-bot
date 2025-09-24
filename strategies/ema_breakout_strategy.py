@@ -18,10 +18,14 @@ class EMABreakoutStrategy(BaseStrategy):
         self.order_expiry_minutes = config.get("order_expiry_minutes", 60)
         self.min_atr_pips = config.get("min_atr_pips", 5)
         self.rr_dynamic = config.get("rr_dynamic", True)
+        self.trailing_cfg = config.get("trailing", {})
 
         # New bar gating
         self.last_bar_time = None
 
+    # ========================
+    # Helpers
+    # ========================
     def _calculate_ema(self, df):
         for p in self.ema_periods:
             df[f"ema_{p}"] = df["close"].ewm(span=p).mean()
@@ -45,6 +49,80 @@ class EMABreakoutStrategy(BaseStrategy):
             return "DOWN"
         return "FLAT"
 
+    def _get_trailing_params(self):
+        """Returnează parametrii trailing din config sau fallback din RiskManager."""
+        if self.trailing_cfg:
+            return {
+                "be_min_profit_pips": float(self.trailing_cfg.get("be_min_profit_pips", 10)),
+                "step_pips": float(self.trailing_cfg.get("step_pips", 5)),
+                "atr_multiplier": float(self.trailing_cfg.get("atr_multiplier", 1.5)),
+            }
+        if hasattr(self.risk_manager, "get_trailing_params"):
+            return self.risk_manager.get_trailing_params()
+        return {"be_min_profit_pips": 10.0, "step_pips": 5.0, "atr_multiplier": 1.5}
+
+    def _apply_trailing(self, atr_price, pip):
+        """
+        Trailing stop pe timeframe-ul strategiei (M5):
+          - BE la un prag minim de profit
+          - trailing ATR după BE
+          - update SL doar dacă depășim step_pips
+        """
+        positions = self.mt5.positions_get(symbol=self.symbol)
+        if not positions:
+            return
+
+        trailing = self._get_trailing_params()
+        be_pips = trailing["be_min_profit_pips"]
+        step_pips = trailing["step_pips"]
+        atr_mult = trailing["atr_multiplier"]
+
+        tick = self.mt5.get_symbol_tick(self.symbol)
+        if tick is None:
+            return
+        bid = float(getattr(tick, "bid", 0.0))
+        ask = float(getattr(tick, "ask", 0.0))
+        if bid <= 0 and ask <= 0:
+            return
+
+        for pos in positions:
+            # Preț curent
+            current = ask if pos.type == self.mt5.ORDER_TYPE_BUY else bid
+            entry = float(pos.price_open)
+            current_sl = float(pos.sl) if getattr(pos, "sl", 0.0) else 0.0
+
+            # Profit în pips
+            if pos.type == self.mt5.ORDER_TYPE_BUY:
+                profit_pips = (current - entry) / pip
+            else:
+                profit_pips = (entry - current) / pip
+
+            if profit_pips < be_pips:
+                continue
+
+            # === Break-even ===
+            needs_be = (
+                (pos.type == self.mt5.ORDER_TYPE_BUY and (current_sl == 0.0 or current_sl < entry)) or
+                (pos.type == self.mt5.ORDER_TYPE_SELL and (current_sl == 0.0 or current_sl > entry))
+            )
+            if needs_be:
+                self.trade_manager._update_sl(self.symbol, pos.ticket, entry)
+                continue
+
+            # === Trailing dinamic ATR ===
+            distance_price = atr_mult * float(atr_price)
+            if pos.type == self.mt5.ORDER_TYPE_BUY:
+                candidate_sl = current - distance_price
+                if candidate_sl > current_sl + step_pips * pip:
+                    self.trade_manager._update_sl(self.symbol, pos.ticket, max(entry, candidate_sl))
+            else:
+                candidate_sl = current + distance_price
+                if candidate_sl < current_sl - step_pips * pip:
+                    self.trade_manager._update_sl(self.symbol, pos.ticket, min(entry, candidate_sl))
+
+    # ========================
+    # Main loop
+    # ========================
     def run_once(self):
         try:
             trend = self._check_trend_h1()
@@ -65,15 +143,17 @@ class EMABreakoutStrategy(BaseStrategy):
                 return
             self.last_bar_time = current_bar_time
 
+            # ATR și filtru volatilitate
             df = calculate_atr(df, 14)
-            atr_pips = df["atr"].iloc[-1] / self.mt5.get_pip_size(self.symbol)
+            atr_price = float(df["atr"].iloc[-1])
+            pip = self.mt5.get_pip_size(self.symbol)
+            atr_pips = atr_price / pip
             if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
                 self.logger.log(f"🔍 {self.symbol} ATR prea mic ({atr_pips:.2f} pips) → skip")
                 return
 
             high5 = df["high"].iloc[-5:].max()
             low5 = df["low"].iloc[-5:].min()
-            pip = self.mt5.get_pip_size(self.symbol)
 
             if trend == "UP":
                 entry = high5 + self.offset_pips * pip
@@ -94,8 +174,7 @@ class EMABreakoutStrategy(BaseStrategy):
             if lot <= 0 or not self.risk_manager.check_free_margin():
                 return
 
-            expiration = datetime.now() + timedelta(minutes=self.order_expiry_minutes)
-
+            expiration_dt = datetime.datetime.now() + datetime.timedelta(minutes=60)
             request = {
                 "action": self.mt5.TRADE_ACTION_PENDING,
                 "symbol": self.symbol,
@@ -108,7 +187,7 @@ class EMABreakoutStrategy(BaseStrategy):
                 "magic": 13931993,
                 "comment": "EMA Breakout strategy",
                 "type_time": self.mt5.ORDER_TIME_SPECIFIED,
-                "expiration": expiration,
+                "expiration": int(expiration_dt.timestamp()),
                 "type_filling": self.mt5.ORDER_FILLING_RETURN,
             }
 
@@ -118,6 +197,9 @@ class EMABreakoutStrategy(BaseStrategy):
             else:
                 self.logger.log(f"🔍 OrderSend result: retcode={result.retcode}, comment={getattr(result, 'comment', '')}")
                 self.logger.log(f"🔍 Full request: {request}")
+
+            # === trailing pentru pozițiile activate ===
+            self._apply_trailing(atr_price, pip)
 
         except Exception as e:
             trace = traceback.format_exc()

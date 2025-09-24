@@ -30,7 +30,6 @@ class PivotStrategy(BaseStrategy):
 
             # === Filtru ATR minim ===
             atr_price = float(df["atr"].iloc[-1])
-            min_atr_pips = self.config.get("min_atr_pips", 5)
             pip = self.mt5.get_pip_size(self.symbol)
             atr_pips = atr_price / pip
             if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
@@ -61,7 +60,9 @@ class PivotStrategy(BaseStrategy):
                 self.trade_manager.open_trade(self.symbol, "BUY", lot, entry_price, sl, tp)
                 self.last_trade_time = datetime.now()
 
-            self._manage_trailing()
+            # === Trailing stop pe timeframe-ul strategiei ===
+            self._apply_trailing(df, atr_price, pip)
+
         except Exception as e:
             self.logger.log(f"❌ Error in PivotStrategy {self.symbol}: {e}")
             self.logger.log(traceback.format_exc())
@@ -86,8 +87,32 @@ class PivotStrategy(BaseStrategy):
         df["ema21"] = df["close"].ewm(span=21).mean()
         return df["ema8"].iloc[-1] > df["ema21"].iloc[-1]
 
-    def _manage_trailing(self):
+    def _apply_trailing(self, df, atr_price, pip):
+        """Trailing stop integrat în strategie."""
         positions = self.mt5.positions_get(symbol=self.symbol)
         if not positions:
             return
-        self.trade_manager.manage_trailing_stop(self.symbol)
+
+        step_pips = self.trailing_cfg.get("step_pips", 5)
+        be_trigger = self.trailing_cfg.get("breakeven_trigger", 10)
+
+        price = self.mt5.symbol_info_tick(self.symbol).bid
+
+        for pos in positions:
+            if pos.type != self.mt5.ORDER_TYPE_BUY:
+                continue
+
+            entry = pos.price_open
+            sl = pos.sl
+            profit_pips = (price - entry) / pip
+
+            # === Break-even ===
+            if sl < entry and profit_pips >= be_trigger:
+                new_sl = entry
+                self.trade_manager._update_sl(self.symbol, pos.ticket, new_sl)
+                continue
+
+            # === Trailing incremental ===
+            desired_sl = price - step_pips * pip
+            if desired_sl > sl + step_pips * pip:
+                self.trade_manager._update_sl(self.symbol, pos.ticket, desired_sl)

@@ -17,8 +17,8 @@ class RiskManager:
         self.max_daily_profit = config.get("daily_profit", 500)
         self.min_free_margin_ratio = config.get("min_free_margin_ratio", 0.6)
         self.max_drawdown = config.get("max_drawdown", 0.2)
-        
-        # sesiuni de trading
+
+        # sesiuni de trading (din general.session_hours)
         general_cfg = config.get("general", {})
         self.sessions = general_cfg.get("session_hours", [])
         self.min_atr_pips = float(config.get("min_atr_pips", 5))
@@ -173,12 +173,16 @@ class RiskManager:
     def _in_trading_session(self):
         """
         Returnează True dacă acum suntem într-una din ferestrele de timp definite în general.session_hours.
-        Format sesiuni: [["10:00","19:00"], ["14:00","23:00"]]
+        Format sesiuni: [["10:00","19:00"], ["14:00","23:00"]] (ora României)
         """
         sessions = getattr(self, "sessions", [])
         if not sessions:
             return True
-        now = datetime.datetime.now().time()
+
+        # folosim ora României (Europe/Bucharest)
+        timezone = pytz.timezone("Europe/Bucharest")
+        now = datetime.datetime.now(timezone).time()
+
         for pair in sessions:
             try:
                 start = datetime.datetime.strptime(pair[0], "%H:%M").time()
@@ -190,9 +194,7 @@ class RiskManager:
         return False
 
     def can_trade(self, verbose=False):
-        """Returnează True dacă botul poate deschide noi tranzacții.
-        Păstrează toate condițiile existente și ADĂUGĂ filtrul de sesiuni + throttling la log.
-        """
+        """Returnează True dacă botul poate deschide noi tranzacții."""
         if hasattr(self, "_reset_if_new_day"):
             try:
                 self._reset_if_new_day()
@@ -248,7 +250,7 @@ class RiskManager:
 
     def get_trailing_params(self):
         return self.trailing_params
-        
+
     def get_atr_threshold(self, symbol: str) -> float:
         """Returnează pragul ATR în pips pentru simbolul dat"""
         return float(self.atr_thresholds.get(symbol, 5.0))  # fallback default = 5 pips

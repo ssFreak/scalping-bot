@@ -33,7 +33,7 @@ class BotManager:
         
         # === Manageri ===
         deviation = self.config.get("general").get("deviation", 5)
-        self.trade_manager = TradeManager(self.config, self.logger, deviation, self.mt5)
+        self.trade_manager = TradeManager(self.logger, deviation,self.mt5)
         self.risk_manager = RiskManager(self.config, self.logger, self.trade_manager, self.mt5)
         
         # Injectăm risk_manager înapoi în trade_manager

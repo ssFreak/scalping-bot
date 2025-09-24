@@ -18,17 +18,17 @@ general:
     - EURUSD
     
   atr_thresholds_pips:
-    EURUSD: 4.5   # (4+5)/2
-    GBPUSD: 6.5   # (6+7)/2
-    USDCHF: 3.5   # (3+4)/2
-    USDCAD: 4.5   # (4+5)/2
-    NZDUSD: 3.5   # (3+4)/2
-    EURGBP: 3.5   # (3+4)/2
-    EURCAD: 5.5   # (5+6)/2
-    GBPAUD: 8.0   # (7+9)/2
-    AUDJPY: 6.5   # (6+7)/2
-    NZDCAD: 3.5   # (3+4)/2
-    CHFJPY: 4.5   # (4+5)/2
+    EURUSD: 3.37
+    GBPUSD: 4.87
+    USDCHF: 2.33
+    USDCAD: 3.37
+    NZDUSD: 2.33
+    EURGBP: 2.33
+    EURCAD: 4.12  
+    GBPAUD: 6.0   
+    AUDJPY: 4.87
+    NZDCAD: 2.33
+    CHFJPY: 3.37
 
   # Ținta de profit zilnică totală pentru toate simbolurile combinate.
   daily_profit: 150.0

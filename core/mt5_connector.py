@@ -83,6 +83,9 @@ class MT5Connector:
     def get_timeframe(self, tf_str):
         # ex: 'M1', 'M5', 'H1'
         return getattr(self.mt5, f"TIMEFRAME_{tf_str.upper()}") if self.mt5 else None
+        
+    def last_error(self):
+        return mt5.last_error()
 
     # --- pips util
     def get_pip_size(self, symbol):
