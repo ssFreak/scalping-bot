@@ -4,6 +4,7 @@ import signal
 import sys
 import yaml
 from datetime import datetime
+import os
 
 from core.mt5_connector import MT5Connector
 from managers.trade_manager import TradeManager
@@ -22,8 +23,17 @@ class BotManager:
         self.logger.log("🚀 Initializare Scalping Bot...")
 
         # Load config
-        with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Fișierul de config nu există: {config_path}")
+
+        # încercăm mai întâi utf-8-sig (dacă fișierul are BOM)
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
+                self.config = yaml.safe_load(f)
+        except UnicodeDecodeError:
+            # fallback pe utf-8 clasic
+            with open(config_path, "r", encoding="utf-8") as f:
+                self.config = yaml.safe_load(f)
 
         # === Conexiune MT5 ===
         self.mt5 = MT5Connector(self.logger)

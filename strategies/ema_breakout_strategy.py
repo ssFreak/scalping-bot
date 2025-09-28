@@ -1,6 +1,6 @@
 import pandas as pd
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from strategies.base_strategy import BaseStrategy
 from core.utils import calculate_atr
@@ -14,24 +14,27 @@ class EMABreakoutStrategy(BaseStrategy):
 
         # Parametri din config
         self.ema_periods = config.get("ema_periods", [8, 13, 21])
-        self.offset_pips = config.get("offset_pips", 3)
-        self.order_expiry_minutes = config.get("order_expiry_minutes", 60)
-        self.min_atr_pips = config.get("min_atr_pips", 5)
-        self.rr_dynamic = config.get("rr_dynamic", True)
+        self.offset_pips = float(config.get("offset_pips", 3))
+        self.order_expiry_minutes = int(config.get("order_expiry_minutes", 60))
+        self.min_atr_pips = float(config.get("min_atr_pips", 5))
+        self.rr_dynamic = bool(config.get("rr_dynamic", True))
         self.trailing_cfg = config.get("trailing", {})
 
         # New bar gating
         self.last_bar_time = None
 
+        # Expirare manuală: {order_ticket: datetime_expiry_utc}
+        self._pending_expirations = {}
+
     # ========================
     # Helpers
     # ========================
-    def _calculate_ema(self, df):
+    def _calculate_ema(self, df: pd.DataFrame) -> pd.DataFrame:
         for p in self.ema_periods:
-            df[f"ema_{p}"] = df["close"].ewm(span=p).mean()
+            df[f"ema_{p}"] = df["close"].ewm(span=int(p)).mean()
         return df
 
-    def _check_trend_h1(self):
+    def _check_trend_h1(self) -> str:
         rates = self.mt5.get_rates(self.symbol, self.timeframe_h1, 200)
         if rates is None or len(rates) == 0:
             return "FLAT"
@@ -41,16 +44,22 @@ class EMABreakoutStrategy(BaseStrategy):
             return "FLAT"
 
         df = self._calculate_ema(df)
-        last = df.iloc[-1]
 
-        if last[f"ema_{self.ema_periods[0]}"] > last[f"ema_{self.ema_periods[1]}"] > last[f"ema_{self.ema_periods[2]}"]:
+        try:
+            ema1 = float(df[f"ema_{self.ema_periods[0]}"].iloc[-1])
+            ema2 = float(df[f"ema_{self.ema_periods[1]}"].iloc[-1])
+            ema3 = float(df[f"ema_{self.ema_periods[2]}"].iloc[-1])
+        except Exception as e:
+            self.logger.log(f"❌ EMA calc error: {e}")
+            return "FLAT"
+
+        if ema1 > ema2 > ema3:
             return "UP"
-        elif last[f"ema_{self.ema_periods[0]}"] < last[f"ema_{self.ema_periods[1]}"] < last[f"ema_{self.ema_periods[2]}"]:
+        if ema1 < ema2 < ema3:
             return "DOWN"
         return "FLAT"
 
     def _get_trailing_params(self):
-        """Returnează parametrii trailing din config sau fallback din RiskManager."""
         if self.trailing_cfg:
             return {
                 "be_min_profit_pips": float(self.trailing_cfg.get("be_min_profit_pips", 10)),
@@ -61,46 +70,33 @@ class EMABreakoutStrategy(BaseStrategy):
             return self.risk_manager.get_trailing_params()
         return {"be_min_profit_pips": 10.0, "step_pips": 5.0, "atr_multiplier": 1.5}
 
-    def _apply_trailing(self, atr_price, pip):
-        """
-        Trailing stop pe timeframe-ul strategiei (M5):
-          - BE la un prag minim de profit
-          - trailing ATR după BE
-          - update SL doar dacă depășim step_pips
-        """
+    def _apply_trailing(self, atr_price: float, pip: float) -> None:
         positions = self.mt5.positions_get(symbol=self.symbol)
         if not positions:
             return
 
         trailing = self._get_trailing_params()
-        be_pips = trailing["be_min_profit_pips"]
-        step_pips = trailing["step_pips"]
-        atr_mult = trailing["atr_multiplier"]
+        be_pips = float(trailing["be_min_profit_pips"])
+        step_pips = float(trailing["step_pips"])
+        atr_mult = float(trailing["atr_multiplier"])
 
         tick = self.mt5.get_symbol_tick(self.symbol)
         if tick is None:
             return
         bid = float(getattr(tick, "bid", 0.0))
         ask = float(getattr(tick, "ask", 0.0))
-        if bid <= 0 and ask <= 0:
+        if bid <= 0.0 and ask <= 0.0:
             return
 
         for pos in positions:
-            # Preț curent
             current = ask if pos.type == self.mt5.ORDER_TYPE_BUY else bid
             entry = float(pos.price_open)
-            current_sl = float(pos.sl) if getattr(pos, "sl", 0.0) else 0.0
+            current_sl = float(pos.sl) if float(getattr(pos, "sl", 0.0)) else 0.0
 
-            # Profit în pips
-            if pos.type == self.mt5.ORDER_TYPE_BUY:
-                profit_pips = (current - entry) / pip
-            else:
-                profit_pips = (entry - current) / pip
-
-            if profit_pips < be_pips:
+            profit_pips = (current - entry) / pip if pos.type == self.mt5.ORDER_TYPE_BUY else (entry - current) / pip
+            if float(profit_pips) < be_pips:
                 continue
 
-            # === Break-even ===
             needs_be = (
                 (pos.type == self.mt5.ORDER_TYPE_BUY and (current_sl == 0.0 or current_sl < entry)) or
                 (pos.type == self.mt5.ORDER_TYPE_SELL and (current_sl == 0.0 or current_sl > entry))
@@ -109,7 +105,6 @@ class EMABreakoutStrategy(BaseStrategy):
                 self.trade_manager._update_sl(self.symbol, pos.ticket, entry)
                 continue
 
-            # === Trailing dinamic ATR ===
             distance_price = atr_mult * float(atr_price)
             if pos.type == self.mt5.ORDER_TYPE_BUY:
                 candidate_sl = current - distance_price
@@ -120,11 +115,50 @@ class EMABreakoutStrategy(BaseStrategy):
                 if candidate_sl < current_sl - step_pips * pip:
                     self.trade_manager._update_sl(self.symbol, pos.ticket, min(entry, candidate_sl))
 
+    # --- Expirare manuală (helperi) ---
+    def _record_pending_expiry(self, order_ticket: int) -> None:
+        """Memorează expirarea manuală pentru un ordin pending plasat."""
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=self.order_expiry_minutes)
+        self._pending_expirations[int(order_ticket)] = expiry
+        self.logger.log(f"⏱️ Pending ticket={order_ticket} va expira manual la {expiry.isoformat()}")
+
+    def _check_and_purge_expired_pending(self) -> None:
+        """Șterge ordinele pending expirate și curăță cele executate/dispărute."""
+        if not self._pending_expirations:
+            return
+
+        now = datetime.now(timezone.utc)
+        # Ordine active pentru simbol
+        open_orders = self.mt5.orders_get(symbol=self.symbol) or []
+        open_tickets = {int(getattr(o, "ticket", 0)) for o in open_orders}
+
+        to_delete = []
+        for ticket, exp_time in list(self._pending_expirations.items()):
+            # dacă ordinul nu mai e în piață -> a fost executat/șters; îl scoatem din dict
+            if ticket not in open_tickets:
+                to_delete.append(ticket)
+                continue
+            # dacă a expirat -> îl ștergem explicit
+            if now >= exp_time:
+                req = {"action": self.mt5.TRADE_ACTION_REMOVE, "order": int(ticket), "comment": "Manual expiration"}
+                res = self.mt5.order_send(req)
+                if res and getattr(res, "retcode", None) == self.mt5.TRADE_RETCODE_DONE:
+                    self.logger.log(f"⏰ Pending order {ticket} expirat și șters la {now.isoformat()}")
+                    to_delete.append(ticket)
+                else:
+                    self.logger.log(f"⚠️ Remove failed ticket={ticket}: retcode={getattr(res,'retcode',None)}, "
+                                    f"comment={getattr(res,'comment','')}")
+        for t in to_delete:
+            self._pending_expirations.pop(t, None)
+
     # ========================
     # Main loop
     # ========================
     def run_once(self):
         try:
+            # housekeeping: expirări manuale
+            self._check_and_purge_expired_pending()
+
             trend = self._check_trend_h1()
             if trend == "FLAT":
                 return
@@ -137,57 +171,64 @@ class EMABreakoutStrategy(BaseStrategy):
             if df.empty:
                 return
 
-            # New bar gating
-            current_bar_time = df["time"].iloc[-1]
+            current_bar_time = int(df["time"].iloc[-1])
             if self.last_bar_time == current_bar_time:
                 return
             self.last_bar_time = current_bar_time
 
-            # ATR și filtru volatilitate
             df = calculate_atr(df, 14)
             atr_price = float(df["atr"].iloc[-1])
-            pip = self.mt5.get_pip_size(self.symbol)
-            atr_pips = atr_price / pip
-            if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
-                self.logger.log(f"🔍 {self.symbol} ATR prea mic ({atr_pips:.2f} pips) → skip")
+            pip = float(self.mt5.get_pip_size(self.symbol))
+            atr_pips = float(atr_price / pip)
+
+            # threshold scalar safe
+            try:
+                atr_threshold = float(self.risk_manager.get_atr_threshold(self.symbol))
+            except TypeError:
+                # unele implementări cer timeframe
+                atr_threshold = float(self.risk_manager.get_atr_threshold(self.symbol, self.timeframe_m5))
+            except Exception:
+                atr_threshold = self.min_atr_pips
+
+            if atr_pips < atr_threshold:
+                # self.logger.log(f"🔍 {self.symbol} ATR prea mic ({atr_pips:.2f} pips) < {atr_threshold} → skip")
                 return
 
-            high5 = df["high"].iloc[-5:].max()
-            low5 = df["low"].iloc[-5:].min()
+            high5 = float(df["high"].iloc[-5:].max())
+            low5 = float(df["low"].iloc[-5:].min())
 
             if trend == "UP":
-                entry = high5 + self.offset_pips * pip
-                sl = low5
-                rr = 1.0 + (atr_pips / 10 if self.rr_dynamic else 0.0)
-                tp = entry + rr * (entry - sl)
+                entry = float(high5 + self.offset_pips * pip)
+                sl = float(low5)
+                rr = 1.0 + (atr_pips / 10.0 if self.rr_dynamic else 0.0)
+                tp = float(entry + rr * (entry - sl))
                 order_type = self.mt5.ORDER_TYPE_BUY_STOP
             elif trend == "DOWN":
-                entry = low5 - self.offset_pips * pip
-                sl = high5
-                rr = 1.0 + (atr_pips / 10 if self.rr_dynamic else 0.0)
-                tp = entry - rr * (sl - entry)
+                entry = float(low5 - self.offset_pips * pip)
+                sl = float(high5)
+                rr = 1.0 + (atr_pips / 10.0 if self.rr_dynamic else 0.0)
+                tp = float(entry - rr * (sl - entry))
                 order_type = self.mt5.ORDER_TYPE_SELL_STOP
             else:
                 return
 
-            lot = self.risk_manager.calculate_lot_size(self.symbol, trend, entry, sl)
-            if lot <= 0 or not self.risk_manager.check_free_margin():
+            lot = float(self.risk_manager.calculate_lot_size(self.symbol, trend, entry, sl))
+            if lot <= 0.0 or not self.risk_manager.check_free_margin():
                 return
 
-            expiration_dt = datetime.datetime.now() + datetime.timedelta(minutes=60)
+            # Pending GTC (fără expiration pe request) + expirare manuală
             request = {
                 "action": self.mt5.TRADE_ACTION_PENDING,
                 "symbol": self.symbol,
                 "volume": lot,
                 "type": order_type,
-                "price": entry,
-                "sl": sl,
-                "tp": tp,
+                "price": float(entry),
+                "sl": float(sl),
+                "tp": float(tp),
                 "deviation": 50,
                 "magic": 13931993,
                 "comment": "EMA Breakout strategy",
-                "type_time": self.mt5.ORDER_TIME_SPECIFIED,
-                "expiration": int(expiration_dt.timestamp()),
+                "type_time": self.mt5.ORDER_TIME_GTC,   # GTC
                 "type_filling": self.mt5.ORDER_FILLING_RETURN,
             }
 
@@ -195,10 +236,16 @@ class EMABreakoutStrategy(BaseStrategy):
             if result is None:
                 self.logger.log(f"❌ order_send returned None → simbol inactiv sau conexiune pierdută")
             else:
-                self.logger.log(f"🔍 OrderSend result: retcode={result.retcode}, comment={getattr(result, 'comment', '')}")
+                self.logger.log(f"🔍 OrderSend result: retcode={getattr(result,'retcode',None)}, "
+                                f"comment={getattr(result,'comment','')}")
                 self.logger.log(f"🔍 Full request: {request}")
+                # dacă e pending creat, memorăm expirarea manuală
+                if getattr(result, "retcode", None) == self.mt5.TRADE_RETCODE_DONE:
+                    order_ticket = int(getattr(result, "order", 0))
+                    if order_ticket > 0:
+                        self._record_pending_expiry(order_ticket)
 
-            # === trailing pentru pozițiile activate ===
+            # trailing pentru pozițiile deja activate
             self._apply_trailing(atr_price, pip)
 
         except Exception as e:

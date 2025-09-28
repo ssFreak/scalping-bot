@@ -16,29 +16,63 @@ general:
     - NZDCAD
     - CHFJPY
     - EURUSD
-    
+
+  # Praguri ATR în pips, diferențiate pe timeframe-uri (M1, M5, H1)
   atr_thresholds_pips:
-    EURUSD: 3.37
-    GBPUSD: 4.87
-    USDCHF: 2.33
-    USDCAD: 3.37
-    NZDUSD: 2.33
-    EURGBP: 2.33
-    EURCAD: 4.12  
-    GBPAUD: 6.0   
-    AUDJPY: 4.87
-    NZDCAD: 2.33
-    CHFJPY: 3.37
+    EURUSD:
+      M1: 2.0
+      M5: 5.0
+      H1: 17.0
+    GBPUSD:
+      M1: 2.0
+      M5: 5.0
+      H1: 18.0
+    USDCHF:
+      M1: 1.5
+      M5: 3.5
+      H1: 14.0
+    USDCAD:
+      M1: 1.5
+      M5: 3.5
+      H1: 14.0
+    NZDUSD:
+      M1: 1.2
+      M5: 3.0
+      H1: 11.0
+    EURGBP:
+      M1: 1.0
+      M5: 2.5
+      H1: 8.5
+    EURCAD:
+      M1: 2.5
+      M5: 6.0
+      H1: 21.0
+    GBPAUD:
+      M1: 3.5
+      M5: 8.0
+      H1: 30.0
+    AUDJPY:
+      M1: 2.0
+      M5: 5.0
+      H1: 19.0
+    NZDCAD:
+      M1: 1.5
+      M5: 3.5
+      H1: 13.0
+    CHFJPY:
+      M1: 3.0
+      M5: 7.0
+      H1: 25.0
 
   # Ținta de profit zilnică totală pentru toate simbolurile combinate.
-  daily_profit: 150.0
+  daily_profit: 100.0
   daily_loss: -250.0
 
   # Parametrii de risk management
   risk_per_trade: 0.02        # 2% risc per tranzacție
   max_position_lot: 0.3       # Limită lot maxim per poziție
   min_free_margin_ratio: 0.6  # Marjă liberă minimă 60%
-  deviation: 5
+  deviation: 50               # Deviatia e exprimata in points nu in pips
 
   # Trailing stop global (activat la acest prag de profit, în pips)
   trailing_profit_threshold: 15.0
@@ -48,7 +82,7 @@ general:
 
   # Orele de sesiuni (ora României)
   session_hours:
-    - ["10:00", "19:00"]   # Londra
+    - ["09:00", "19:00"]   # Londra
     - ["14:00", "23:00"]   # New York
 
 # ==========================
@@ -58,10 +92,11 @@ strategies:
   pivot:
     enabled: true
     timeframe: M1
-    atr_multiplier: 2.5
     pivot_levels: [S1, R1]
-    atr_period: 14
-    min_atr_pips: 5
+    atr_period: 12
+    atr_method: "ema"   # sau "rma", "sma"
+    tp_atr_multiplier: 1.5
+    sl_atr_multiplier: 2.5
     volume_lookback: 20
     min_volume_multiplier: 1.2
     cooldown_minutes: 5
@@ -70,10 +105,10 @@ strategies:
     enabled: true
     timeframe: M5
     sma_periods: [5, 8, 13]
-    atr_period: 14
+    atr_period: 12
+    atr_method: "ema"   # sau "rma", "sma"
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.5
-    min_atr_pips: 5
     volume_lookback: 20
     min_volume_multiplier: 1.2
     cooldown_minutes: 5
@@ -85,17 +120,21 @@ strategies:
     macd_fast: 12
     macd_slow: 26
     macd_signal: 9
-    atr_period: 14
+    atr_period: 12
+    atr_method: "ema"   # sau "rma", "sma"
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.0
-   
+
   ema_breakout:
     enabled: true
+    timeframe: M5
     ema_periods: [8, 13, 21]
     offset_pips: 3
     order_expiry_minutes: 60
-    min_atr_pips: 5
+    atr_period: 12
+    atr_method: "ema"   # sau "rma", "sma"
     rr_dynamic: true
+    min_atr_pips: 5     # ← va fi ignorat, se folosește atr_thresholds_pips
 
   ema_crossover:
     enabled: false

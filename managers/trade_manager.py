@@ -1,4 +1,5 @@
 import traceback
+from datetime import datetime
 
 
 class TradeManager:
@@ -29,6 +30,32 @@ class TradeManager:
                 return False
         return True
 
+    def _choose_filling_mode(self, symbol):
+        info = self.mt5.get_symbol_info(symbol)
+        if info is None:
+            self.logger.log(f"❌ No symbol info for {symbol}")
+            return None
+
+        fm = getattr(info, "filling_mode", None)
+        self.logger.log(f"ℹ️ {symbol} filling_mode reported by broker = {fm}")
+
+        valid = {
+            self.mt5.ORDER_FILLING_FOK,
+            self.mt5.ORDER_FILLING_IOC,
+            self.mt5.ORDER_FILLING_RETURN,
+            }
+        # adăugăm și BOC dacă există în librărie, altfel fallback la int=3
+        if hasattr(self.mt5, "ORDER_FILLING_BOC"):
+            valid.add(self.mt5.ORDER_FILLING_BOC)
+        else:
+            valid.add(3)
+
+        if fm in valid:
+            return fm
+
+        self.logger.log(f"❌ Unsupported filling mode {fm} for {symbol}")
+        return None
+
     def _update_sl(self, symbol, ticket, new_sl):
         """Actualizează Stop Loss pentru un ticket existent."""
         if not self._ensure_symbol(symbol):
@@ -58,10 +85,15 @@ class TradeManager:
         result = self.mt5.order_send(request)
         if result is None:
             err = self.mt5.last_error()
-            self.logger.log(f"❌ SL update failed for {symbol}: order_send returned None, last_error={err}, request={request}")
+            self.logger.log(
+                f"❌ SL update failed for {symbol}: order_send returned None, last_error={err}, request={request}"
+            )
             return False
         if result.retcode != self.mt5.TRADE_RETCODE_DONE:
-            self.logger.log(f"❌ SL update failed for {symbol}: retcode={result.retcode}, comment={getattr(result,'comment','')}, request={request}")
+            self.logger.log(
+                f"❌ SL update failed for {symbol}: retcode={result.retcode}, "
+                f"comment={getattr(result,'comment','')}, request={request}"
+            )
             return False
 
         self.logger.log(f"✅ SL updated for {symbol}, ticket={ticket}, new SL={new_sl}")
@@ -79,7 +111,9 @@ class TradeManager:
             result = self.mt5.order_send(request)
             if result is None:
                 err = self.mt5.last_error()
-                self.logger.log(f"❌ order_send returned None ({context}) for {symbol}, last_error={err}, request={request}")
+                self.logger.log(
+                    f"❌ order_send returned None ({context}) for {symbol}, last_error={err}, request={request}"
+                )
                 return None
 
             if result.retcode != self.mt5.TRADE_RETCODE_DONE:
@@ -105,7 +139,7 @@ class TradeManager:
     # =====================
     def open_trade(self, symbol, order_type, lot, sl, tp, deviation_points, comment=""):
         """
-        Deschide o poziție market (BUY/SELL).
+        Deschide o poziție market (BUY/SELL) și o loghează în positions.xlsx dacă reușește.
         """
         if not self._ensure_symbol(symbol):
             return None
@@ -116,6 +150,10 @@ class TradeManager:
             return None
 
         price = tick.ask if order_type == self.mt5.ORDER_TYPE_BUY else tick.bid
+
+        filling_type = self._choose_filling_mode(symbol)
+        if filling_type is None:
+            return None
 
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
@@ -128,14 +166,30 @@ class TradeManager:
             "deviation": deviation_points,
             "magic": self.magic_number,
             "comment": comment,
-            "type_filling": self.mt5.ORDER_FILLING_RETURN,
+            "type_filling": filling_type,
         }
 
-        return self.safe_order_send(request, f"open {symbol}")
+        result = self.safe_order_send(request, f"open {symbol}")
+
+        # dacă s-a executat cu succes -> logăm și în positions.xlsx
+        if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+            order_type_str = "BUY" if order_type == self.mt5.ORDER_TYPE_BUY else "SELL"
+            self.logger.log_position(
+                symbol=symbol,
+                order_type=order_type_str,
+                lot_size=lot,
+                entry_price=price,
+                sl=sl,
+                tp=tp,
+                comment=comment,
+                closed=False,
+            )
+
+        return result
 
     def close_trade(self, symbol, ticket):
         """
-        Închide o poziție existentă.
+        Închide o poziție existentă și marchează în positions.xlsx că a fost închisă.
         """
         if not self._ensure_symbol(symbol):
             return None
@@ -156,7 +210,13 @@ class TradeManager:
             return None
 
         price = tick.bid if pos.type == self.mt5.ORDER_TYPE_BUY else tick.ask
-        order_type = self.mt5.ORDER_TYPE_SELL if pos.type == self.mt5.ORDER_TYPE_BUY else self.mt5.ORDER_TYPE_BUY
+        order_type = (
+            self.mt5.ORDER_TYPE_SELL if pos.type == self.mt5.ORDER_TYPE_BUY else self.mt5.ORDER_TYPE_BUY
+        )
+
+        filling_type = self._choose_filling_mode(symbol)
+        if filling_type is None:
+            return None
 
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
@@ -168,7 +228,22 @@ class TradeManager:
             "deviation": self.trade_deviation,
             "magic": self.magic_number,
             "comment": "Close trade",
-            "type_filling": self.mt5.ORDER_FILLING_RETURN,
+            "type_filling": filling_type,
         }
 
-        return self.safe_order_send(request, f"close {symbol}")
+        result = self.safe_order_send(request, f"close {symbol}")
+
+        # dacă s-a executat cu succes -> notăm în positions.xlsx
+        if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+            self.logger.log_position(
+                symbol=symbol,
+                order_type="CLOSE",
+                lot_size=pos.volume,
+                entry_price=price,
+                sl=pos.sl,
+                tp=pos.tp,
+                comment=f"Closed ticket {ticket}",
+                closed=True,
+            )
+
+        return result

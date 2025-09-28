@@ -11,6 +11,7 @@ class MARibbonStrategy(BaseStrategy):
         self.timeframe = self.mt5.get_timeframe(config.get("timeframe", "M5"))
         self.sma_periods = config.get("sma_periods", [5, 8, 13])
         self.atr_period = config.get("atr_period", 14)
+        self.atr_method = config.get("atr_method", "ema")
         self.tp_atr_multiplier = config.get("tp_atr_multiplier", 1.5)
         self.sl_atr_multiplier = config.get("sl_atr_multiplier", 2.5)
 
@@ -47,15 +48,15 @@ class MARibbonStrategy(BaseStrategy):
                 df[f"SMA_{p}"] = df["close"].rolling(window=p).mean()
 
             # ATR (în preț)
-            df["atr"] = self._calculate_atr(df, self.atr_period)
+            df["atr"] = self._calculate_atr(df, self.atr_period,self.atr_method)
             atr_price = float(df["atr"].iloc[-1])
             pip = self.mt5.get_pip_size(self.symbol)
             if pip <= 0:
                 return
             atr_pips = atr_price / pip
-
-            # === Filtru ATR minim (din RiskManager threshold pe simbol) ===
-            if atr_pips < self.risk_manager.get_atr_threshold(self.symbol):
+            atr_threshold = self.risk_manager.get_atr_threshold(self.symbol, self.timeframe)
+            if atr_pips < atr_threshold:
+                # self.logger.log(f"🔍 MA Ribbon: {self.symbol} ATR prea mic ({atr_pips:.2f} pips) < ({atr_threshold}) → skip")
                 return
 
             # === Filtru volum ===
@@ -103,10 +104,30 @@ class MARibbonStrategy(BaseStrategy):
                 self._apply_trailing(df, atr_price, pip)
                 return
 
-            # Lot sizing + verificări de marjă
+            
+            if direction=="BUY":
+                order_type = self.mt5.ORDER_TYPE_BUY
+            elif direction=="SELL":
+                order_type = self.mt5.ORDER_TYPE_SELL
+                
+            # Lot sizing + verificări de marjă    
             lot = self.risk_manager.calculate_lot_size(self.symbol, direction, entry_price, sl)
             if lot > 0 and self.risk_manager.check_free_margin():
-                placed = self.trade_manager.open_trade(self.symbol, direction, lot, entry_price, sl, tp)
+            
+                info = self.mt5.get_symbol_info(self.symbol)
+                digits = info.digits if info else 5  # fallback
+                sl = round(sl, digits)
+                tp = round(tp, digits)
+                
+                placed = self.trade_manager.open_trade(
+                                symbol=self.symbol, 
+                                order_type=order_type,
+                                lot=lot,
+                                sl=sl, 
+                                tp=tp,
+                                deviation=self.trade_manager.deviation,
+                                comment="MA Ribbon {direction}"
+                                )
                 if placed:
                     self.last_trade_time = datetime.now()
 
@@ -120,12 +141,21 @@ class MARibbonStrategy(BaseStrategy):
     # ----------------------------
     # Helpers
     # ----------------------------
-    def _calculate_atr(self, df, period):
+    def _calculate_atr(self, df, period, method="ema"):
         high_low = df["high"] - df["low"]
         high_close = (df["high"] - df["close"].shift()).abs()
         low_close = (df["low"] - df["close"].shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        return tr.rolling(period).mean()
+
+        if method == "sma":
+            return tr.rolling(period).mean()
+        elif method == "ema":
+            return tr.ewm(span=period, adjust=False).mean()
+        elif method == "rma":  # Wilder’s ATR
+            alpha = 1 / period
+            return tr.ewm(alpha=alpha, adjust=False).mean()
+        else:
+            raise ValueError(f"Unknown ATR method: {method}")
 
     def _dynamic_rr(self, atr_pips: float) -> float:
         # RR flexibil între 1 și 3 în funcție de vol

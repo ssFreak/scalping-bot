@@ -1,12 +1,20 @@
 import pandas as pd
 
-
-def calculate_atr(df, period=14):
+def calculate_atr(df: pd.DataFrame, period: int = 14, method: str = "ema") -> pd.DataFrame:
     high_low = df["high"] - df["low"]
-    high_prev_close = (df["high"] - df["close"].shift()).abs()
-    low_prev_close = (df["low"] - df["close"].shift()).abs()
-    df["tr"] = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(axis=1)
-    df["atr"] = df["tr"].ewm(span=period, adjust=False).mean()
+    high_close = (df["high"] - df["close"].shift()).abs()
+    low_close = (df["low"] - df["close"].shift()).abs()
+    df["tr"] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+
+    if method == "sma":
+        df["atr"] = df["tr"].rolling(period).mean()
+    elif method == "ema":
+        df["atr"] = df["tr"].ewm(span=period, adjust=False).mean()
+    elif method == "rma":  # Wilder’s ATR
+        df["atr"] = df["tr"].ewm(alpha=1/period, adjust=False).mean()
+    else:
+        raise ValueError(f"Unknown ATR method: {method}")
+
     return df
 
 

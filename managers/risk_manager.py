@@ -10,7 +10,7 @@ class RiskManager:
         self.trade_manager = trade_manager
         self.mt5 = mt5
 
-        # parametri din YAML
+        # parametri din YAML (istoric - citite direct din rădăcina config)
         self.max_daily_loss = config.get("daily_loss", -100)
         self.risk_per_trade = config.get("risk_per_trade", 0.01)
         self.max_equity_risk = config.get("max_equity_risk", 0.1)
@@ -23,6 +23,9 @@ class RiskManager:
         self.sessions = general_cfg.get("session_hours", [])
         self.min_atr_pips = float(config.get("min_atr_pips", 5))
         self._last_can_trade_log_ts = 0.0
+
+        # praguri ATR pe simbol; pot fi fie număr, fie dict pe TF (M1/M5/H1)
+        # ex: { "EURUSD": { "M1": 2.0, "M5": 5.0, "H1": 17.0 }, ... }
         self.atr_thresholds = general_cfg.get("atr_thresholds_pips", {})
 
         # trailing (dacă există în config)
@@ -251,6 +254,57 @@ class RiskManager:
     def get_trailing_params(self):
         return self.trailing_params
 
-    def get_atr_threshold(self, symbol: str) -> float:
-        """Returnează pragul ATR în pips pentru simbolul dat"""
-        return float(self.atr_thresholds.get(symbol, 5.0))  # fallback default = 5 pips
+    # -------------------------
+    # ATR thresholds (per symbol + timeframe)
+    # -------------------------
+    def _normalize_timeframe(self, tf) -> str:
+        """Normalizează reprezentări de timeframe la 'M1'/'M5'/'H1'."""
+        if tf is None:
+            return None
+        s = str(tf).upper()
+        # Acceptă și valori gen '1', '5', '60' din unele configurări
+        if s in ("M1", "1"): return "M1"
+        if s in ("M5", "5"): return "M5"
+        if s in ("H1", "60", "1H"): return "H1"
+        return s  # dacă vine altceva, returnăm ca atare
+
+    def get_atr_threshold(self, symbol: str, timeframe: str = None) -> float:
+        """
+        Returnează pragul ATR (în pips) pentru simbolul dat.
+        - Suportă atât valori simple (float) pe simbol, cât și dict pe TF (M1/M5/H1).
+        - Dacă timeframe nu e dat și există dict, folosește prioritar M1 > M5 > H1 (fallback compatibil).
+        - Dacă simbolul lipsește din config, folosește 5.0 pips ca default.
+        """
+        default_val = 5.0
+        sym_map = self.atr_thresholds.get(symbol)
+
+        # Nici o intrare pentru simbol -> fallback
+        if sym_map is None:
+            return default_val
+
+        # Dacă e număr simplu (compatibil cu vechiul config)
+        if isinstance(sym_map, (int, float)):
+            try:
+                return float(sym_map)
+            except Exception:
+                return default_val
+
+        # Dacă e dict pe timeframe
+        if isinstance(sym_map, dict):
+            tf = self._normalize_timeframe(timeframe)
+            if tf and tf in sym_map:
+                try:
+                    return float(sym_map[tf])
+                except Exception:
+                    return default_val
+
+            # fără timeframe explicit: prioritate M1 -> M5 -> H1 (compatibil & conservator)
+            for k in ("M1", "M5", "H1"):
+                if k in sym_map:
+                    try:
+                        return float(sym_map[k])
+                    except Exception:
+                        continue
+
+        # alt format neașteptat -> fallback
+        return default_val

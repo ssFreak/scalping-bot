@@ -9,3 +9,6 @@ rmi_trend_sync_strategy.py
 trading_log.txt
 logs/
 trading_journal_30_days.xlsx
+core/atr_mean_6m.py
+core/atr_report.xlsx
+bot.log.txt
