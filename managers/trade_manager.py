@@ -247,3 +247,66 @@ class TradeManager:
             )
 
         return result
+
+    def apply_trailing(self, symbol, pos, atr_price, pip, params):
+        """
+        Aplică trailing stop pe o poziție existentă.
+        params: dict cu cheile:
+            - be_min_profit_pips
+            - step_pips
+            - atr_multiplier
+        """
+        be_pips = float(params.get("be_min_profit_pips", 10))
+        step_pips = float(params.get("step_pips", 5))
+        atr_mult = float(params.get("atr_multiplier", 1.5))
+
+        tick = self.mt5.get_symbol_tick(symbol)
+        if tick is None:
+            return
+
+        bid = float(getattr(tick, "bid", 0.0))
+        ask = float(getattr(tick, "ask", 0.0))
+        if bid <= 0.0 and ask <= 0.0:
+            return
+
+        current = ask if pos.type == self.mt5.ORDER_TYPE_BUY else bid
+        entry = float(pos.price_open)
+        current_sl = float(pos.sl) if float(getattr(pos, "sl", 0.0)) else 0.0
+
+        # Profit în pips
+        profit_pips = (current - entry) / pip if pos.type == self.mt5.ORDER_TYPE_BUY else (entry - current) / pip
+        if profit_pips < be_pips:
+            return
+
+        # Mutare la break-even
+        needs_be = (
+            (pos.type == self.mt5.ORDER_TYPE_BUY and (current_sl == 0.0 or current_sl < entry)) or
+            (pos.type == self.mt5.ORDER_TYPE_SELL and (current_sl == 0.0 or current_sl > entry))
+        )
+        if needs_be:
+            self._update_sl(symbol, pos.ticket, entry)
+            return
+
+        # Trailing dinamic pe ATR
+        distance_price = atr_mult * float(atr_price)
+
+        if pos.type == self.mt5.ORDER_TYPE_BUY:
+            candidate_sl = current - distance_price
+            if candidate_sl > current_sl + step_pips * pip:
+                self._update_sl(symbol, pos.ticket, max(entry, candidate_sl))
+        else:
+            candidate_sl = current + distance_price
+            if candidate_sl < current_sl - step_pips * pip:
+                self._update_sl(symbol, pos.ticket, min(entry, candidate_sl))
+
+    def close_all_trades(self):
+        """Închide toate pozițiile deschise pentru toate simbolurile."""
+        positions = self.mt5.positions_get()
+        if not positions:
+            return
+
+        for pos in positions:
+            try:
+                self.close_trade(pos.symbol, pos.ticket)
+            except Exception as e:
+                self.logger.log(f"❌ Eroare la închiderea forțată a {pos.symbol} ticket={pos.ticket}: {e}")

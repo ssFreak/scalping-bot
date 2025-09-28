@@ -37,7 +37,7 @@ class PivotStrategy(BaseStrategy):
             atr_pips = atr_price / pip
             atr_threshold = self.risk_manager.get_atr_threshold(self.symbol, self.timeframe)
             if atr_pips < atr_threshold:
-                #self.logger.log(f"🔍 Pivot: {self.symbol} ATR prea mic ({atr_pips:.2f} pips) < ({atr_threshold}) → skip")
+                # self.logger.log(f"🔍 Pivot: {self.symbol} ATR prea mic ({atr_pips:.2f} pips) < ({atr_threshold}) → skip")
                 return
 
             # === Filtru volum ===
@@ -140,45 +140,27 @@ class PivotStrategy(BaseStrategy):
         return df["ema8"].iloc[-1] > df["ema21"].iloc[-1]
 
     def _apply_trailing(self, df, atr_price, pip):
-        """Trailing stop integrat în strategie."""
+        """
+        Refactor trailing: delegăm către TradeManager.apply_trailing pentru fiecare poziție.
+        Semnătura rămâne neschimbată (df este nefolosit aici; e păstrat pentru compatibilitate).
+        """
         positions = self.mt5.positions_get(symbol=self.symbol)
         if not positions:
             return
 
-        step_pips = self.trailing_cfg.get("step_pips", 5)
-        be_trigger = self.trailing_cfg.get("breakeven_trigger", 10)
-
-        price = self.mt5.symbol_info_tick(self.symbol).bid
+        # Parametrii per strategie (fallback pe global din RiskManager)
+        params = self.trailing_cfg or (
+            self.risk_manager.get_trailing_params() if hasattr(self.risk_manager, "get_trailing_params") else {
+                "be_min_profit_pips": 10.0,
+                "step_pips": 5.0,
+                "atr_multiplier": 1.5,
+            }
+        )
 
         for pos in positions:
-            if pos.type == self.mt5.ORDER_TYPE_BUY:
-                entry = pos.price_open
-                sl = pos.sl
-                profit_pips = (price - entry) / pip
-
-                # === Break-even ===
-                if sl < entry and profit_pips >= be_trigger:
-                    new_sl = entry
-                    self.trade_manager._update_sl(self.symbol, pos.ticket, new_sl)
-                    continue
-
-                # === Trailing incremental ===
-                desired_sl = price - step_pips * pip
-                if desired_sl > sl + step_pips * pip:
-                    self.trade_manager._update_sl(self.symbol, pos.ticket, desired_sl)
-
-            elif pos.type == self.mt5.ORDER_TYPE_SELL:
-                entry = pos.price_open
-                sl = pos.sl
-                profit_pips = (entry - price) / pip
-
-                # === Break-even ===
-                if sl > entry and profit_pips >= be_trigger:
-                    new_sl = entry
-                    self.trade_manager._update_sl(self.symbol, pos.ticket, new_sl)
-                    continue
-
-                # === Trailing incremental ===
-                desired_sl = price + step_pips * pip
-                if desired_sl < sl - step_pips * pip:
-                    self.trade_manager._update_sl(self.symbol, pos.ticket, desired_sl)
+            try:
+                self.trade_manager.apply_trailing(self.symbol, pos, atr_price, pip, params)
+            except Exception as e:
+                self.logger.log(
+                    f"❌ apply_trailing error {self.symbol} ticket={getattr(pos,'ticket','?')}: {e}"
+                )

@@ -111,6 +111,13 @@ class BotManager:
 
         while not self.stop_event.is_set():
             try:
+                if self.risk_manager.check_drawdown_breach():
+                    self.logger.log("🛑 Drawdown maxim atins. Trading oprit până mâine.")
+                    self.trade_manager.close_all_trades()
+                    self.risk_manager.trading_blocked_until_next_day = True
+                    time.sleep(60)
+                    continue
+
                 if self.risk_manager.can_trade(verbose=False):
                     strategy.run_once()
                 else:

@@ -71,49 +71,21 @@ class EMABreakoutStrategy(BaseStrategy):
         return {"be_min_profit_pips": 10.0, "step_pips": 5.0, "atr_multiplier": 1.5}
 
     def _apply_trailing(self, atr_price: float, pip: float) -> None:
+        """
+        Refactor: delegăm trailing-ul către TradeManager.apply_trailing pentru fiecare poziție.
+        """
         positions = self.mt5.positions_get(symbol=self.symbol)
         if not positions:
             return
 
-        trailing = self._get_trailing_params()
-        be_pips = float(trailing["be_min_profit_pips"])
-        step_pips = float(trailing["step_pips"])
-        atr_mult = float(trailing["atr_multiplier"])
-
-        tick = self.mt5.get_symbol_tick(self.symbol)
-        if tick is None:
-            return
-        bid = float(getattr(tick, "bid", 0.0))
-        ask = float(getattr(tick, "ask", 0.0))
-        if bid <= 0.0 and ask <= 0.0:
-            return
-
+        params = self._get_trailing_params()
         for pos in positions:
-            current = ask if pos.type == self.mt5.ORDER_TYPE_BUY else bid
-            entry = float(pos.price_open)
-            current_sl = float(pos.sl) if float(getattr(pos, "sl", 0.0)) else 0.0
-
-            profit_pips = (current - entry) / pip if pos.type == self.mt5.ORDER_TYPE_BUY else (entry - current) / pip
-            if float(profit_pips) < be_pips:
-                continue
-
-            needs_be = (
-                (pos.type == self.mt5.ORDER_TYPE_BUY and (current_sl == 0.0 or current_sl < entry)) or
-                (pos.type == self.mt5.ORDER_TYPE_SELL and (current_sl == 0.0 or current_sl > entry))
-            )
-            if needs_be:
-                self.trade_manager._update_sl(self.symbol, pos.ticket, entry)
-                continue
-
-            distance_price = atr_mult * float(atr_price)
-            if pos.type == self.mt5.ORDER_TYPE_BUY:
-                candidate_sl = current - distance_price
-                if candidate_sl > current_sl + step_pips * pip:
-                    self.trade_manager._update_sl(self.symbol, pos.ticket, max(entry, candidate_sl))
-            else:
-                candidate_sl = current + distance_price
-                if candidate_sl < current_sl - step_pips * pip:
-                    self.trade_manager._update_sl(self.symbol, pos.ticket, min(entry, candidate_sl))
+            try:
+                self.trade_manager.apply_trailing(self.symbol, pos, atr_price, pip, params)
+            except Exception as e:
+                self.logger.log(
+                    f"❌ apply_trailing error {self.symbol} ticket={getattr(pos,'ticket','?')}: {e}"
+                )
 
     # --- Expirare manuală (helperi) ---
     def _record_pending_expiry(self, order_ticket: int) -> None:
@@ -245,7 +217,7 @@ class EMABreakoutStrategy(BaseStrategy):
                     if order_ticket > 0:
                         self._record_pending_expiry(order_ticket)
 
-            # trailing pentru pozițiile deja activate
+            # trailing pentru pozițiile deja activate (apel centralizat în TradeManager)
             self._apply_trailing(atr_price, pip)
 
         except Exception as e:

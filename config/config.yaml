@@ -1,23 +1,16 @@
-# ==========================
-# Configurație Scalping Bot
-# ==========================
-
 general:
-  # Lista de simboluri Forex pe care se va tranzacționa
   symbols_forex:
-    - GBPUSD
-    - USDCHF
-    - USDCAD
-    - NZDUSD
-    - EURGBP
-    - EURCAD
-    - GBPAUD
-    - AUDJPY
-    - NZDCAD
-    - CHFJPY
-    - EURUSD
-
-  # Praguri ATR în pips, diferențiate pe timeframe-uri (M1, M5, H1)
+  - GBPUSD
+  - USDCHF
+  - USDCAD
+  - NZDUSD
+  - EURGBP
+  - EURCAD
+  - GBPAUD
+  - AUDJPY
+  - NZDCAD
+  - CHFJPY
+  - EURUSD
   atr_thresholds_pips:
     EURUSD:
       M1: 2.0
@@ -63,56 +56,49 @@ general:
       M1: 3.0
       M5: 7.0
       H1: 25.0
-
-  # Ținta de profit zilnică totală pentru toate simbolurile combinate.
   daily_profit: 100.0
   daily_loss: -250.0
-
-  # Parametrii de risk management
-  risk_per_trade: 0.02        # 2% risc per tranzacție
-  max_position_lot: 0.3       # Limită lot maxim per poziție
-  min_free_margin_ratio: 0.6  # Marjă liberă minimă 60%
-  deviation: 50               # Deviatia e exprimata in points nu in pips
-
-  # Trailing stop global (activat la acest prag de profit, în pips)
+  risk_per_trade: 0.02
+  max_position_lot: 0.3
+  min_free_margin_ratio: 0.6
+  deviation: 50
   trailing_profit_threshold: 15.0
-
-  # Thread monitoring configuration
   thread_monitor_logging: true
-
-  # Orele de sesiuni (ora României)
   session_hours:
-    - ["09:00", "19:00"]   # Londra
-    - ["14:00", "23:00"]   # New York
-
-# ==========================
-# Configurația strategiilor
-# ==========================
+  - - 09:00
+    - '19:00'
+  - - '14:00'
+    - '23:00'
+  max_equity_risk: 0.1
+  max_drawdown: 0.2
 strategies:
   pivot:
     enabled: true
     timeframe: M1
-    pivot_levels: [S1, R1]
+    pivot_levels:
+    - S1
+    - R1
     atr_period: 12
-    atr_method: "ema"   # sau "rma", "sma"
+    atr_method: ema
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.5
     volume_lookback: 20
     min_volume_multiplier: 1.2
     cooldown_minutes: 5
-
   moving_average_ribbon:
     enabled: true
     timeframe: M5
-    sma_periods: [5, 8, 13]
+    sma_periods:
+    - 5
+    - 8
+    - 13
     atr_period: 12
-    atr_method: "ema"   # sau "rma", "sma"
+    atr_method: ema
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.5
     volume_lookback: 20
     min_volume_multiplier: 1.2
     cooldown_minutes: 5
-
   momentum_scalping:
     enabled: false
     timeframe: M1
@@ -121,29 +107,35 @@ strategies:
     macd_slow: 26
     macd_signal: 9
     atr_period: 12
-    atr_method: "ema"   # sau "rma", "sma"
+    atr_method: ema
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.0
-
   ema_breakout:
     enabled: true
     timeframe: M5
-    ema_periods: [8, 13, 21]
+    ema_periods:
+    - 8
+    - 13
+    - 21
     offset_pips: 3
     order_expiry_minutes: 60
     atr_period: 12
-    atr_method: "ema"   # sau "rma", "sma"
+    atr_method: ema
     rr_dynamic: true
-    min_atr_pips: 5     # ← va fi ignorat, se folosește atr_thresholds_pips
-
+    min_atr_pips: 5
+    trailing:
+      be_min_profit_pips: 10
+      step_pips: 5
+      atr_multiplier: 1.5
   ema_crossover:
     enabled: false
-
   ema_rsi_filter:
     enabled: false
-
   linear_regression:
     enabled: false
-
   rmi_supertrend:
     enabled: false
+trailing:
+  be_min_profit_pips: 10
+  step_pips: 5
+  atr_multiplier: 1.5
