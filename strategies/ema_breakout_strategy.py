@@ -142,6 +142,9 @@ class EMABreakoutStrategy(BaseStrategy):
             df = pd.DataFrame(rates)
             if df.empty:
                 return
+                
+            if not self.risk_manager.check_strategy_exposure("ema_breakout", self.symbol):
+                return  # skip trade
 
             current_bar_time = int(df["time"].iloc[-1])
             if self.last_bar_time == current_bar_time:

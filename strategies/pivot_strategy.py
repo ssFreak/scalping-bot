@@ -27,6 +27,9 @@ class PivotStrategy(BaseStrategy):
             rates = self.mt5.get_rates(self.symbol, self.timeframe, 200)
             if rates is None or len(rates) < 50:
                 return
+                
+            if not self.risk_manager.check_strategy_exposure("pivot", self.symbol):
+                return  # skip trade
 
             df = pd.DataFrame(rates)
             df["atr"] = self._calculate_atr(df, self.atr_period, self.atr_method)
@@ -69,7 +72,7 @@ class PivotStrategy(BaseStrategy):
                 tp = round(tp, digits)
 
                 lot = self.risk_manager.calculate_lot_size(self.symbol, "BUY", entry_price, sl)
-                if lot > 0 and self.risk_manager.check_free_margin():
+                if lot > 0 and self.risk_manager.check_free_margin(self.symbol, lot, self.trade_manager.mt5.ORDER_TYPE_BUY):
                     self.trade_manager.open_trade(
                         symbol=self.symbol,
                         order_type=self.trade_manager.mt5.ORDER_TYPE_BUY,
@@ -91,7 +94,7 @@ class PivotStrategy(BaseStrategy):
                 tp = round(tp, digits)
 
                 lot = self.risk_manager.calculate_lot_size(self.symbol, "SELL", entry_price, sl)
-                if lot > 0 and self.risk_manager.check_free_margin():
+                if lot > 0 and self.risk_manager.check_free_margin(self.symbol, lot, self.trade_manager.mt5.ORDER_TYPE_SELL):
                     self.trade_manager.open_trade(
                         symbol=self.symbol,
                         order_type=self.trade_manager.mt5.ORDER_TYPE_SELL,

@@ -36,6 +36,9 @@ class MARibbonStrategy(BaseStrategy):
             df = pd.DataFrame(rates)
             if df.empty:
                 return
+                
+            if not self.risk_manager.check_strategy_exposure("ma_ribbon", self.symbol):
+                return  # skip trade
 
             # New bar gating
             current_bar_time = df["time"].iloc[-1]

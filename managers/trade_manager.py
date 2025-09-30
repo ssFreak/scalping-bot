@@ -44,7 +44,6 @@ class TradeManager:
             self.mt5.ORDER_FILLING_IOC,
             self.mt5.ORDER_FILLING_RETURN,
             }
-        # adăugăm și BOC dacă există în librărie, altfel fallback la int=3
         if hasattr(self.mt5, "ORDER_FILLING_BOC"):
             valid.add(self.mt5.ORDER_FILLING_BOC)
         else:
@@ -53,8 +52,10 @@ class TradeManager:
         if fm in valid:
             return fm
 
-        self.logger.log(f"❌ Unsupported filling mode {fm} for {symbol}")
-        return None
+        # Fallback → RETURN
+        self.logger.log(f"⚠️ Unsupported filling mode {fm} for {symbol}, fallback to ORDER_FILLING_RETURN")
+        return self.mt5.ORDER_FILLING_RETURN
+
 
     def _update_sl(self, symbol, ticket, new_sl):
         """Actualizează Stop Loss pentru un ticket existent."""
@@ -214,9 +215,7 @@ class TradeManager:
             self.mt5.ORDER_TYPE_SELL if pos.type == self.mt5.ORDER_TYPE_BUY else self.mt5.ORDER_TYPE_BUY
         )
 
-        filling_type = self._choose_filling_mode(symbol)
-        if filling_type is None:
-            return None
+        filling_type = self.mt5.ORDER_FILLING_RETURN
 
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
@@ -248,56 +247,64 @@ class TradeManager:
 
         return result
 
-    def apply_trailing(self, symbol, pos, atr_price, pip, params):
+    def apply_trailing(self, position, atr_pips: float, params: dict):
         """
-        Aplică trailing stop pe o poziție existentă.
-        params: dict cu cheile:
-            - be_min_profit_pips
-            - step_pips
-            - atr_multiplier
+        Aplica trailing stop (break-even + ATR/step trailing) pentru o pozitie existenta.
+        Adaugat log detaliat pentru debugging.
         """
-        be_pips = float(params.get("be_min_profit_pips", 10))
-        step_pips = float(params.get("step_pips", 5))
-        atr_mult = float(params.get("atr_multiplier", 1.5))
-
-        tick = self.mt5.get_symbol_tick(symbol)
-        if tick is None:
-            return
-
-        bid = float(getattr(tick, "bid", 0.0))
-        ask = float(getattr(tick, "ask", 0.0))
-        if bid <= 0.0 and ask <= 0.0:
-            return
-
-        current = ask if pos.type == self.mt5.ORDER_TYPE_BUY else bid
-        entry = float(pos.price_open)
-        current_sl = float(pos.sl) if float(getattr(pos, "sl", 0.0)) else 0.0
-
-        # Profit în pips
-        profit_pips = (current - entry) / pip if pos.type == self.mt5.ORDER_TYPE_BUY else (entry - current) / pip
-        if profit_pips < be_pips:
-            return
-
-        # Mutare la break-even
-        needs_be = (
-            (pos.type == self.mt5.ORDER_TYPE_BUY and (current_sl == 0.0 or current_sl < entry)) or
-            (pos.type == self.mt5.ORDER_TYPE_SELL and (current_sl == 0.0 or current_sl > entry))
-        )
-        if needs_be:
-            self._update_sl(symbol, pos.ticket, entry)
-            return
-
-        # Trailing dinamic pe ATR
-        distance_price = atr_mult * float(atr_price)
-
-        if pos.type == self.mt5.ORDER_TYPE_BUY:
-            candidate_sl = current - distance_price
-            if candidate_sl > current_sl + step_pips * pip:
-                self._update_sl(symbol, pos.ticket, max(entry, candidate_sl))
-        else:
-            candidate_sl = current + distance_price
-            if candidate_sl < current_sl - step_pips * pip:
-                self._update_sl(symbol, pos.ticket, min(entry, candidate_sl))
+        try:
+            symbol = position.symbol
+            ticket = position.ticket
+            entry_price = position.price_open
+            sl = position.sl
+            tp = position.tp
+            volume = position.volume
+            order_type = position.type  # 0=buy, 1=sell
+    
+            point = self.mt5.symbol_info(symbol).point
+            digits = self.mt5.symbol_info(symbol).digits
+            current_price = self.mt5.symbol_info_tick(symbol).bid if order_type == 0 else self.mt5.symbol_info_tick(symbol).ask
+    
+            # calc profit in pips
+            profit_pips = (current_price - entry_price) / point if order_type == 0 else (entry_price - current_price) / point
+    
+            self.logger.log(f"🔍 Trailing check {symbol} ticket={ticket} profit={profit_pips:.1f} pips (SL={sl}, TP={tp})")
+    
+            be_min_profit = params.get("be_min_profit_pips", 10)
+            step_pips = params.get("step_pips", 5)
+            atr_mult = params.get("atr_multiplier", 1.5)
+    
+            new_sl = None
+    
+            # Break-even
+            if profit_pips >= be_min_profit:
+                be_price = entry_price + (0.5 * point if order_type == 0 else -0.5 * point)
+                if (order_type == 0 and (sl is None or sl < be_price)) or (order_type == 1 and (sl is None or sl > be_price)):
+                    new_sl = be_price
+                    self.logger.log(f"➡️ Moving SL to BE for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
+    
+            # Step trailing
+            if profit_pips >= be_min_profit + step_pips:
+                step_price = current_price - step_pips * point if order_type == 0 else current_price + step_pips * point
+                if (order_type == 0 and (sl is None or sl < step_price)) or (order_type == 1 and (sl is None or sl > step_price)):
+                    new_sl = step_price
+                    self.logger.log(f"➡️ Step trailing update for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
+    
+            # ATR trailing
+            atr_trail = atr_pips * atr_mult
+            atr_price = current_price - atr_trail * point if order_type == 0 else current_price + atr_trail * point
+            if (order_type == 0 and (sl is None or sl < atr_price)) or (order_type == 1 and (sl is None or sl > atr_price)):
+                new_sl = atr_price
+                self.logger.log(f"➡️ ATR trailing update for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
+    
+            # Dacă avem un nou SL, îl trimitem la broker
+            if new_sl:
+                self._update_sl(ticket, new_sl)
+            else:
+                self.logger.log(f"ℹ️ No SL change for {symbol}, ticket={ticket} (conditions not met)")
+    
+        except Exception as e:
+            self.logger.log(f"❌ apply_trailing error for {symbol} ticket={ticket}: {e}")
 
     def close_all_trades(self):
         """Închide toate pozițiile deschise pentru toate simbolurile."""

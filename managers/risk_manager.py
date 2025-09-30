@@ -89,7 +89,7 @@ class RiskManager:
         for pair in self.sessions:
             try:
                 start = datetime.datetime.strptime(pair[0], "%H:%M").time()
-                end = datetime.datetime.strptime(pair[1], "%H:%M").time()
+                end = datetime.datetime.strptime(pair[0], "%H:%M").time()
                 if start <= now <= end:
                     return True
             except Exception:
@@ -368,3 +368,24 @@ class RiskManager:
             return True
 
         return False
+        
+    def check_strategy_exposure(self, strategy: str, symbol: str) -> bool:
+        """Verifică dacă strategia mai are voie să deschidă poziții/ordine pe simbol."""
+        limits = self.config.get("exposure_limits", {}).get(strategy, {}).get(symbol, {})
+        max_positions = int(limits.get("max_positions", 0))
+        if max_positions <= 0:
+            return True  # fără limită
+    
+        # Poziții deschise
+        positions = self.mt5.positions_get(symbol=symbol) or []
+        pos_count = sum(1 for p in positions if getattr(p, "comment", "").startswith(strategy))
+    
+        # Ordine pending
+        orders = self.mt5.orders_get(symbol=symbol) or []
+        ord_count = sum(1 for o in orders if getattr(o, "comment", "").startswith(strategy))
+    
+        total = pos_count + ord_count
+        if total >= max_positions:
+            self.logger.log(f"❌ Exposure limit: {strategy} {symbol} already has {total}/{max_positions} positions+orders")
+            return False
+        return True

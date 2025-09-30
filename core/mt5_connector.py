@@ -125,7 +125,32 @@ class MT5Connector:
 
     # --- orders / positions / history
     def order_send(self, request):
-        return self.mt5.order_send(request) if self.mt5 else None
+        symbol = request.get("symbol")
+        info = mt5.symbol_info(symbol)
+        if not info:
+            if self.logger:
+                self.logger.log(f"❌ Symbol info indisponibil pentru {symbol}")
+            return None
+
+        # Fallback pentru filling_mode nesuportat
+        if info.filling_mode != request.get("type_filling"):
+            if self.logger:
+                self.logger.log(f"⚠️ Filling mode {request.get('type_filling')} "
+                                f"nu este suportat pentru {symbol}, "
+                                f"fallback la ORDER_FILLING_RETURN")
+            request["type_filling"] = mt5.ORDER_FILLING_RETURN
+
+        result = mt5.order_send(request)
+
+        if self.logger:
+            if result is None:
+                self.logger.log(f"❌ order_send failed pentru {symbol}")
+            elif result.retcode != mt5.TRADE_RETCODE_DONE:
+                self.logger.log(f"⚠️ order_send pentru {symbol} a eșuat "
+                                f"(retcode={result.retcode}, comment={getattr(result, 'comment', '')})")
+            else:
+                self.logger.log(f"✅ order_send OK pentru {symbol}: ticket={result.order}")
+        return result
 
     def positions_get(self, symbol=None):
         if not self.mt5:
@@ -187,3 +212,14 @@ class MT5Connector:
             self.initialized = False
             if self.logger:
                 self.logger.log("🛑 MT5 shutdown complete")
+
+    def order_calc_margin(self, action, symbol, volume, price):
+        """
+        Wrapper peste mt5.order_calc_margin.
+        Returnează marja necesară pentru un ordin propus.
+        """
+        try:
+            return mt5.order_calc_margin(action, symbol, volume, price)
+        except Exception as e:
+            self.logger.log(f"❌ Eroare la order_calc_margin pentru {symbol}: {e}")
+            return None
