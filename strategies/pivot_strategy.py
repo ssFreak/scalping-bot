@@ -145,7 +145,6 @@ class PivotStrategy(BaseStrategy):
     def _apply_trailing(self, df, atr_price, pip):
         """
         Refactor trailing: delegăm către TradeManager.apply_trailing pentru fiecare poziție.
-        Semnătura rămâne neschimbată (df este nefolosit aici; e păstrat pentru compatibilitate).
         """
         positions = self.mt5.positions_get(symbol=self.symbol)
         if not positions:
@@ -162,6 +161,7 @@ class PivotStrategy(BaseStrategy):
 
         for pos in positions:
             try:
+                # APEL CORECT:
                 self.trade_manager.apply_trailing(self.symbol, pos, atr_price, pip, params)
             except Exception as e:
                 self.logger.log(

@@ -86,15 +86,25 @@ class RiskManager:
             return True
 
         now = datetime.datetime.now().time()
+        #self.logger.log(f"⏰ [Session Check] Ora curentă: {now.strftime('%H:%M:%S')}") # Adaugă logarea orei
+        
+        is_in_session = False
         for pair in self.sessions:
             try:
                 start = datetime.datetime.strptime(pair[0], "%H:%M").time()
-                end = datetime.datetime.strptime(pair[0], "%H:%M").time()
+                end = datetime.datetime.strptime(pair[1], "%H:%M").time() 
+                
+                #self.logger.log(f"⏰ [Session Check] Verifică sesiunea: {pair[0]} - {pair[1]}") # Adaugă logarea intervalului verificat
+                
                 if start <= now <= end:
-                    return True
-            except Exception:
+                    is_in_session = True
+                    break
+            except Exception as e:
+                self.logger.log(f"❌ [Session Check] Eroare la parsing oră: {e}")
                 continue
-        return False
+                
+        #self.logger.log(f"⏰ [Session Check] Rezultat final: {is_in_session}")
+        return is_in_session
 
     def can_trade(self, verbose=False):
         """Returnează True dacă botul poate deschide noi tranzacții."""

@@ -5,11 +5,11 @@ general:
   - USDCAD
   #- NZDUSD
   #- EURGBP
-  #- EURCAD
+  - EURCAD
   #- GBPAUD
-  #- AUDJPY
+  - AUDJPY
   #- NZDCAD
-  #- CHFJPY
+  - CHFJPY
   - EURUSD
   
   atr_thresholds_pips:
@@ -57,9 +57,9 @@ general:
       M1: 3.0
       M5: 7.0
       H1: 25.0
-  daily_profit: 50.0
-  daily_loss: -100.0
-  risk_per_trade: 0.02
+  daily_profit: 75.0               # ⬆️ Mărit TP zilnic
+  daily_loss: -50.0                # ⬇️ Redus pierderea zilnică maximă
+  risk_per_trade: 0.005            # ⬇️ RISC CRITIC: 0.5% (de la 1%)
   max_position_lot: 0.3
   min_free_margin_ratio: 0.6
   deviation: 50
@@ -92,23 +92,29 @@ general:
         max_positions: 2
       USDCAD:
         max_positions: 2
+        
+trailing:
+  be_min_profit_pips: 30
+  step_pips: 5
+  atr_multiplier: 2
 
 strategies:
   pivot:
-    enabled: true
+    enabled: false
     timeframe: M1
     pivot_levels:
     - S1
     - R1
     atr_period: 12
     atr_method: ema
-    tp_atr_multiplier: 1.5
+    tp_atr_multiplier: 3
     sl_atr_multiplier: 2.5
     volume_lookback: 20
     min_volume_multiplier: 1.2
     cooldown_minutes: 5
+    
   moving_average_ribbon:
-    enabled: true
+    enabled: false
     timeframe: M5
     sma_periods:
     - 5
@@ -121,6 +127,25 @@ strategies:
     volume_lookback: 20
     min_volume_multiplier: 1.2
     cooldown_minutes: 5
+    
+  ema_breakout:
+    enabled: true
+    timeframe: M5
+    ema_periods:
+    - 8
+    - 13
+    - 21
+    offset_pips: 1.5                  # ⬇️ Intrare mai rapidă (de la 3)
+    order_expiry_minutes: 15          # ⬇️ Expirare mai rapidă (de la 60)
+    atr_period: 12
+    atr_method: ema
+    rr_target: 2               
+    rr_dynamic: false                
+    min_atr_pips: 5
+    cooldown_minutes: 15            # ⬆️ Cooldown între tranzacții
+    min_bar_length_atr: 0.55        # Lungimea minimă a barei (ca multiplu de ATR)
+    ema_alignment_lookback: 3       # Bare M5 necesare pentru alinierea EMA (8/13/21)
+    
   momentum_scalping:
     enabled: false
     timeframe: M1
@@ -132,23 +157,7 @@ strategies:
     atr_method: ema
     tp_atr_multiplier: 1.5
     sl_atr_multiplier: 2.0
-  ema_breakout:
-    enabled: true
-    timeframe: M5
-    ema_periods:
-    - 8
-    - 13
-    - 21
-    offset_pips: 3
-    order_expiry_minutes: 60
-    atr_period: 12
-    atr_method: ema
-    rr_dynamic: true
-    min_atr_pips: 5
-    trailing:
-      be_min_profit_pips: 10
-      step_pips: 5
-      atr_multiplier: 1.5
+    
   ema_crossover:
     enabled: false
   ema_rsi_filter:
@@ -157,7 +166,3 @@ strategies:
     enabled: false
   rmi_supertrend:
     enabled: false
-trailing:
-  be_min_profit_pips: 10
-  step_pips: 5
-  atr_multiplier: 1.5

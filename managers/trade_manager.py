@@ -29,36 +29,9 @@ class TradeManager:
                 self.logger.log(f"❌ Could not select symbol {symbol} in Market Watch")
                 return False
         return True
-
-    def _choose_filling_mode(self, symbol):
-        info = self.mt5.get_symbol_info(symbol)
-        if info is None:
-            self.logger.log(f"❌ No symbol info for {symbol}")
-            return None
-
-        fm = getattr(info, "filling_mode", None)
-        self.logger.log(f"ℹ️ {symbol} filling_mode reported by broker = {fm}")
-
-        valid = {
-            self.mt5.ORDER_FILLING_FOK,
-            self.mt5.ORDER_FILLING_IOC,
-            self.mt5.ORDER_FILLING_RETURN,
-            }
-        if hasattr(self.mt5, "ORDER_FILLING_BOC"):
-            valid.add(self.mt5.ORDER_FILLING_BOC)
-        else:
-            valid.add(3)
-
-        if fm in valid:
-            return fm
-
-        # Fallback → RETURN
-        self.logger.log(f"⚠️ Unsupported filling mode {fm} for {symbol}, fallback to ORDER_FILLING_RETURN")
-        return self.mt5.ORDER_FILLING_RETURN
-
-
+        
     def _update_sl(self, symbol, ticket, new_sl):
-        """Actualizează Stop Loss pentru un ticket existent."""
+        """Actualizează Stop Loss pentru un ticket existent, eliminând Filling Mode din request."""
         if not self._ensure_symbol(symbol):
             return False
 
@@ -81,24 +54,42 @@ class TradeManager:
             "tp": position.tp,
             "magic": self.magic_number,
             "comment": "Update SL",
+            # CORECȚIE: type_filling este eliminat de aici
         }
 
-        result = self.mt5.order_send(request)
+        result = self.mt5.order_send(request) 
+        
+        # Logica robustă de verificare retcode (Invalid Ticket, No Changes)
         if result is None:
             err = self.mt5.last_error()
             self.logger.log(
                 f"❌ SL update failed for {symbol}: order_send returned None, last_error={err}, request={request}"
             )
             return False
-        if result.retcode != self.mt5.TRADE_RETCODE_DONE:
+            
+        retcode = result.retcode
+        invalid_ticket_code = getattr(self.mt5, "TRADE_RETCODE_INVALID_TICKET", 10017)
+        no_changes_code = getattr(self.mt5, "TRADE_RETCODE_NO_CHANGES", 10016)
+        
+        if retcode == self.mt5.TRADE_RETCODE_DONE:
+            self.logger.log(f"✅ SL updated for {symbol}, ticket={ticket}, new SL={new_sl}")
+            return True
+        elif retcode == invalid_ticket_code:
             self.logger.log(
-                f"❌ SL update failed for {symbol}: retcode={result.retcode}, "
+                f"⚠️ SL update failed for {symbol}, ticket={ticket}: Poziția nu a fost găsită (probabil închisă de broker). Ignoră."
+            )
+            return True
+        elif retcode == no_changes_code:
+             self.logger.log(
+                f"ℹ️ SL update for {symbol}, ticket={ticket}: Nu sunt necesare schimbări (SL e deja setat). Ignoră."
+            )
+             return True
+        else:
+            self.logger.log(
+                f"❌ SL update failed for {symbol}: retcode={retcode}, "
                 f"comment={getattr(result,'comment','')}, request={request}"
             )
             return False
-
-        self.logger.log(f"✅ SL updated for {symbol}, ticket={ticket}, new SL={new_sl}")
-        return True
 
     def safe_order_send(self, request, context=""):
         """
@@ -141,6 +132,7 @@ class TradeManager:
     def open_trade(self, symbol, order_type, lot, sl, tp, deviation_points, comment=""):
         """
         Deschide o poziție market (BUY/SELL) și o loghează în positions.xlsx dacă reușește.
+        Folosește implicit ORDER_FILLING_RETURN.
         """
         if not self._ensure_symbol(symbol):
             return None
@@ -151,10 +143,7 @@ class TradeManager:
             return None
 
         price = tick.ask if order_type == self.mt5.ORDER_TYPE_BUY else tick.bid
-
-        filling_type = self._choose_filling_mode(symbol)
-        if filling_type is None:
-            return None
+        filling_type = self.mt5.ORDER_FILLING_RETURN
 
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
@@ -174,8 +163,10 @@ class TradeManager:
 
         # dacă s-a executat cu succes -> logăm și în positions.xlsx
         if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+            ticket = getattr(result, "order", 0)
             order_type_str = "BUY" if order_type == self.mt5.ORDER_TYPE_BUY else "SELL"
             self.logger.log_position(
+                ticket=ticket,
                 symbol=symbol,
                 order_type=order_type_str,
                 lot_size=lot,
@@ -247,23 +238,34 @@ class TradeManager:
 
         return result
 
-    def apply_trailing(self, position, atr_pips: float, params: dict):
+    def apply_trailing(self, symbol, position, atr_price: float, pip: float, params: dict):
         """
         Aplica trailing stop (break-even + ATR/step trailing) pentru o pozitie existenta.
-        Adaugat log detaliat pentru debugging.
+        Acest cod trebuie sa ruleze doar daca pozitia este pe profit pentru a evita mutarea SL-ului 
+        spre intrare cand pozitia e pe pierdere (cum s-a vazut in log).
         """
         try:
-            symbol = position.symbol
+            # Preluăm datele din obiectul 'position' primit
             ticket = position.ticket
             entry_price = position.price_open
             sl = position.sl
             tp = position.tp
-            volume = position.volume
             order_type = position.type  # 0=buy, 1=sell
     
-            point = self.mt5.symbol_info(symbol).point
-            digits = self.mt5.symbol_info(symbol).digits
-            current_price = self.mt5.symbol_info_tick(symbol).bid if order_type == 0 else self.mt5.symbol_info_tick(symbol).ask
+            # Folosim metodele wrapper corecte
+            info = self.mt5.get_symbol_info(symbol) 
+            if info is None:
+                self.logger.log(f"❌ Cannot get symbol info for {symbol}")
+                return
+                
+            tick = self.mt5.get_symbol_tick(symbol)
+            if tick is None:
+                self.logger.log(f"❌ Cannot get symbol tick for {symbol}")
+                return
+                
+            point = info.point
+            digits = info.digits
+            current_price = tick.bid if order_type == 0 else tick.ask
     
             # calc profit in pips
             profit_pips = (current_price - entry_price) / point if order_type == 0 else (entry_price - current_price) / point
@@ -276,44 +278,34 @@ class TradeManager:
     
             new_sl = None
     
-            # Break-even
-            if profit_pips >= be_min_profit:
-                be_price = entry_price + (0.5 * point if order_type == 0 else -0.5 * point)
-                if (order_type == 0 and (sl is None or sl < be_price)) or (order_type == 1 and (sl is None or sl > be_price)):
-                    new_sl = be_price
-                    self.logger.log(f"➡️ Moving SL to BE for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
-    
-            # Step trailing
-            if profit_pips >= be_min_profit + step_pips:
-                step_price = current_price - step_pips * point if order_type == 0 else current_price + step_pips * point
-                if (order_type == 0 and (sl is None or sl < step_price)) or (order_type == 1 and (sl is None or sl > step_price)):
-                    new_sl = step_price
-                    self.logger.log(f"➡️ Step trailing update for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
-    
-            # ATR trailing
-            atr_trail = atr_pips * atr_mult
-            atr_price = current_price - atr_trail * point if order_type == 0 else current_price + atr_trail * point
-            if (order_type == 0 and (sl is None or sl < atr_price)) or (order_type == 1 and (sl is None or sl > atr_price)):
-                new_sl = atr_price
-                self.logger.log(f"➡️ ATR trailing update for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
-    
+            # VERIFICARE CRITICĂ: ATR/BE Trailing se aplică doar pe profit.
+            if profit_pips > 0:
+                
+                # Break-even
+                if profit_pips >= be_min_profit:
+                    be_price = entry_price + (1 * point) if order_type == 0 else entry_price - (1 * point) # 1 Point buffer
+                    # Aplicăm doar dacă SL-ul curent nu este deja la BE sau mai bun
+                    if (order_type == 0 and (sl is None or sl < be_price)) or (order_type == 1 and (sl is None or sl > be_price)):
+                        new_sl = round(be_price, digits)
+                        self.logger.log(f"➡️ Moving SL to BE for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
+        
+                # ATR trailing (se poate aplica și peste BE, sau direct)
+                atr_pips = atr_price / pip
+                atr_trail_distance = atr_pips * atr_mult 
+                
+                # Calculează prețul SL bazat pe ATR
+                atr_sl_price = current_price - atr_trail_distance * point if order_type == 0 else current_price + atr_trail_distance * point
+                
+                # Aplicăm ATR dacă este mai bun (mai conservator) decât SL-ul curent (inclusiv noul BE)
+                if (order_type == 0 and (new_sl is None or atr_sl_price > new_sl)) or (order_type == 1 and (new_sl is None or atr_sl_price < new_sl)):
+                    new_sl = round(atr_sl_price, digits)
+                    self.logger.log(f"➡️ ATR trailing update for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
+                
             # Dacă avem un nou SL, îl trimitem la broker
-            if new_sl:
-                self._update_sl(ticket, new_sl)
+            if new_sl and sl != new_sl:
+                self._update_sl(symbol, ticket, new_sl)
             else:
-                self.logger.log(f"ℹ️ No SL change for {symbol}, ticket={ticket} (conditions not met)")
+                self.logger.log(f"ℹ️ No SL change for {symbol}, ticket={ticket} (conditions not met or SL is the same)")
     
         except Exception as e:
             self.logger.log(f"❌ apply_trailing error for {symbol} ticket={ticket}: {e}")
-
-    def close_all_trades(self):
-        """Închide toate pozițiile deschise pentru toate simbolurile."""
-        positions = self.mt5.positions_get()
-        if not positions:
-            return
-
-        for pos in positions:
-            try:
-                self.close_trade(pos.symbol, pos.ticket)
-            except Exception as e:
-                self.logger.log(f"❌ Eroare la închiderea forțată a {pos.symbol} ticket={pos.ticket}: {e}")

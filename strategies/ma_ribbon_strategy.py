@@ -180,6 +180,7 @@ class MARibbonStrategy(BaseStrategy):
 
         for pos in positions:
             try:
+                # APEL CORECT:
                 self.trade_manager.apply_trailing(self.symbol, pos, atr_price, pip, params)
             except Exception as e:
                 self.logger.log(
