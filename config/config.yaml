@@ -62,7 +62,7 @@ general:
   risk_per_trade: 0.005            # ⬇️ RISC CRITIC: 0.5% (de la 1%)
   max_position_lot: 0.3
   min_free_margin_ratio: 0.6
-  deviation: 50
+  deviation: 10
   trailing_profit_threshold: 15.0
   thread_monitor_logging: true
   session_hours:

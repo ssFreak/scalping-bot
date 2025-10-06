@@ -123,7 +123,7 @@ class EMABreakoutStrategy(BaseStrategy):
             "action": self.mt5.TRADE_ACTION_REMOVE,
             "order": order_ticket,
             "comment": "EMA Breakout manual expiry",
-            "deviation": 50,
+            "deviation": self.trade_manager.trade_deviation,
             "magic": 13931993,
         }
 
@@ -365,7 +365,7 @@ class EMABreakoutStrategy(BaseStrategy):
                 "price": float(entry),
                 "sl": float(sl),
                 "tp": float(tp),
-                "deviation": 50,
+                "deviation": self.trade_manager.trade_deviation,
                 "magic": 13931993,
                 "comment": strategy_name_prefix,
                 "type_time": self.mt5.ORDER_TIME_GTC,
