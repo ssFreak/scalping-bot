@@ -131,25 +131,41 @@ class MT5Connector:
             if self.logger:
                 self.logger.log(f"❌ Symbol info indisponibil pentru {symbol}")
             return None
+
+        # 🛑 CORECȚIE FINALĂ: Tratarea Filling Mode pentru acțiuni care NU sunt DEAL/PENDING 🛑
+        
         action = request.get("action")
         
-        # Definim acțiunile care NECESITĂ verificarea Filling Mode (Deal sau Pending)
-        is_deal_action = (action == self.mt5.TRADE_ACTION_DEAL or action == self.mt5.TRADE_ACTION_PENDING)
+        # Acțiunile care NU au nevoie de Filling Mode sunt SLTP, MODIFY, REMOVE.
+        # Daca acțiunea este SLTP, trebuie să asigurăm că nu se generează avertismentul.
+        if action == self.TRADE_ACTION_SLTP or action == self.TRADE_ACTION_MODIFY or action == self.TRADE_ACTION_REMOVE:
+            # Pentru aceste acțiuni, nu facem nicio verificare și trimitem cererea direct.
+            result = self.mt5.order_send(request)
+            # Logare specifică, deoarece nu am rulat logica de fallback/avertisment
+            if self.logger:
+                 if result is None:
+                    self.logger.log(f"❌ order_send failed pentru {symbol}")
+                 elif result.retcode != self.TRADE_RETCODE_DONE:
+                    self.logger.log(f"⚠️ order_send pentru {symbol} a eșuat (retcode={result.retcode}, comment={getattr(result, 'comment', '')})")
+                 # Nu logăm succesul modificării SL/TP, pentru a nu umple logul.
+            return result
+
+
+        # --- Logică pentru TRADE_ACTION_DEAL și TRADE_ACTION_PENDING (Cele care necesită Filling Mode) ---
         
-        # Dacă este o acțiune de tranzacționare care necesită Filling Mode
-        if is_deal_action:
-            # Daca modul de umplere al cererii nu corespunde modului simbolului
-            if info.filling_mode != request.get("type_filling"):
-                # Aici se declanșa avertismentul fals
-                if self.logger:
-                    self.logger.log(f"⚠️ Filling mode {request.get('type_filling')} "
-                                    f"nu este suportat pentru {symbol}, "
-                                    f"fallback la ORDER_FILLING_RETURN")
-                
-                # Se aplica fallback-ul doar daca este o actiune DEAL sau PENDING
-                if action == self.mt5.TRADE_ACTION_DEAL or action == self.mt5.TRADE_ACTION_PENDING:
-                    request["type_filling"] = self.mt5.ORDER_FILLING_RETURN
-                    
+        # Daca modul de umplere al cererii nu corespunde modului simbolului
+        if info.filling_mode != request.get("type_filling"):
+            # Aici se declanșa avertismentul fals
+            if self.logger:
+                self.logger.log(f"⚠️ Filling mode {request.get('type_filling')} "
+                                f"nu este suportat pentru {symbol}, "
+                                f"fallback la ORDER_FILLING_RETURN")
+            
+            # Se aplica fallback-ul doar daca este o actiune DEAL sau PENDING
+            request["type_filling"] = self.ORDER_FILLING_RETURN
+            
+        # 🛑 END CORECȚIE FINALĂ 🛑
+        
         result = self.mt5.order_send(request)
 
         if self.logger:
@@ -161,6 +177,7 @@ class MT5Connector:
             else:
                 self.logger.log(f"✅ order_send OK pentru {symbol}: ticket={result.order}")
         return result
+    
     def positions_get(self, symbol=None):
         if not self.mt5:
             return None

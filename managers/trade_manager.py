@@ -54,7 +54,6 @@ class TradeManager:
             "tp": position.tp,
             "magic": self.magic_number,
             "comment": "Update SL",
-            # CORECȚIE: type_filling este eliminat de aici
         }
 
         result = self.mt5.order_send(request) 
@@ -153,7 +152,7 @@ class TradeManager:
             "price": price,
             "sl": sl,
             "tp": tp,
-            "deviation": deviation_points,
+            "deviation": self.trade_deviation,
             "magic": self.magic_number,
             "comment": comment,
             "type_filling": filling_type,
@@ -241,71 +240,109 @@ class TradeManager:
     def apply_trailing(self, symbol, position, atr_price: float, pip: float, params: dict):
         """
         Aplica trailing stop (break-even + ATR/step trailing) pentru o pozitie existenta.
-        Acest cod trebuie sa ruleze doar daca pozitia este pe profit pentru a evita mutarea SL-ului 
-        spre intrare cand pozitia e pe pierdere (cum s-a vazut in log).
+        Implementeaza blocarea Trailing-ului dinamic sub pragul de BE Securizat.
         """
         try:
             # Preluăm datele din obiectul 'position' primit
             ticket = position.ticket
             entry_price = position.price_open
             sl = position.sl
-            tp = position.tp
             order_type = position.type  # 0=buy, 1=sell
     
             # Folosim metodele wrapper corecte
             info = self.mt5.get_symbol_info(symbol) 
-            if info is None:
-                self.logger.log(f"❌ Cannot get symbol info for {symbol}")
-                return
-                
             tick = self.mt5.get_symbol_tick(symbol)
-            if tick is None:
-                self.logger.log(f"❌ Cannot get symbol tick for {symbol}")
-                return
-                
+            if info is None or tick is None: return
+            
             point = info.point
             digits = info.digits
             current_price = tick.bid if order_type == 0 else tick.ask
     
-            # calc profit in pips
             profit_pips = (current_price - entry_price) / point if order_type == 0 else (entry_price - current_price) / point
     
-            self.logger.log(f"🔍 Trailing check {symbol} ticket={ticket} profit={profit_pips:.1f} pips (SL={sl}, TP={tp})")
+            self.logger.log(f"🔍 Trailing check {symbol} ticket={ticket} profit={profit_pips:.1f} pips (SL={sl}, TP={position.tp})")
     
-            be_min_profit = params.get("be_min_profit_pips", 10)
-            step_pips = params.get("step_pips", 5)
-            atr_mult = params.get("atr_multiplier", 1.5)
-    
+            # Parametrii Trailing
+            be_min_profit = params.get("be_min_profit_pips", 20)
+            be_secured_pips = params.get("be_secured_pips", 5.0) 
+            atr_mult = params.get("atr_multiplier", 3.0)
+            trailing_step_pips = params.get("step_pips", 5.0)
+            
+            # Parametrii Profit Lock Absolut
+            profit_lock_threshold = params.get("profit_lock_threshold_pips", 50.0)
+            profit_lock_guarantee = params.get("profit_lock_guarantee_pips", 15.0)
+
             new_sl = None
     
-            # VERIFICARE CRITICĂ: ATR/BE Trailing se aplică doar pe profit.
+            # 🛑 VERIFICARE CRITICĂ: Trailing se aplică doar pe profit.
             if profit_pips > 0:
                 
-                # Break-even
-                if profit_pips >= be_min_profit:
-                    be_price = entry_price + (1 * point) if order_type == 0 else entry_price - (1 * point) # 1 Point buffer
-                    # Aplicăm doar dacă SL-ul curent nu este deja la BE sau mai bun
-                    if (order_type == 0 and (sl is None or sl < be_price)) or (order_type == 1 and (sl is None or sl > be_price)):
-                        new_sl = round(be_price, digits)
-                        self.logger.log(f"➡️ Moving SL to BE for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
-        
-                # ATR trailing (se poate aplica și peste BE, sau direct)
-                atr_pips = atr_price / pip
-                atr_trail_distance = atr_pips * atr_mult 
+                # --- Determinarea Nivelului de Securizare Fixă ---
+                sl_target_pips = None
                 
-                # Calculează prețul SL bazat pe ATR
-                atr_sl_price = current_price - atr_trail_distance * point if order_type == 0 else current_price + atr_trail_distance * point
+                if profit_pips >= profit_lock_threshold:
+                    # 1. 🟢 PROFIT LOCK ABSOLUT (Securizare Câștig Mare: 50 pips)
+                    sl_target_pips = profit_lock_guarantee
+                elif profit_pips >= be_min_profit:
+                    # 2. 🟡 BREAK-EVEN (Profit Securizat Inițial: 20 pips)
+                    sl_target_pips = be_secured_pips
                 
-                # Aplicăm ATR dacă este mai bun (mai conservator) decât SL-ul curent (inclusiv noul BE)
-                if (order_type == 0 and (new_sl is None or atr_sl_price > new_sl)) or (order_type == 1 and (new_sl is None or atr_sl_price < new_sl)):
-                    new_sl = round(atr_sl_price, digits)
-                    self.logger.log(f"➡️ ATR trailing update for {symbol}, ticket={ticket}, new SL={new_sl:.{digits}f}")
                 
-            # Dacă avem un nou SL, îl trimitem la broker
+                # --- EXECUTAREA BLOCULUI DE SECURIZARE FIXĂ (Mutare SL la nivelul fix) ---
+                
+                if sl_target_pips is not None:
+                    sl_lock_price = entry_price + sl_target_pips * point if order_type == 0 else entry_price - sl_target_pips * point
+                    
+                    # Mută SL-ul doar dacă este mai slab decât nivelul țintă
+                    if (order_type == 0 and (sl is None or sl < sl_lock_price)) or \
+                       (order_type == 1 and (sl is None or sl > sl_lock_price)):
+                        
+                        new_sl = round(sl_lock_price, digits)
+                        self.logger.log(f"➡️ Setting SL to guaranteed profit: {sl_target_pips:.1f} pips.")
+                        
+                        # Trimitem comanda imediat și ieșim, lăsând logica Trailing dinamic să preia la următoarea rulare.
+                        self._update_sl(symbol, ticket, new_sl)
+                        return # ⬅️ RETURN: NU FACEM TRAILING DINAMIC ÎN ACEEAȘI RULARE
+                
+                
+                # 🛑 NOU: BLOCAREA TRAILING-ULUI DINAMIC PÂNĂ LA ATINGEREA PRAGULUI FIX 🛑
+                
+                # Trailing-ul dinamic (ATR/Step) se execută doar dacă SL-ul este deja pe profit, 
+                # ceea ce înseamnă că am trecut de faza inițială de securizare.
+                is_sl_in_profit = (order_type == 0 and sl > entry_price) or (order_type == 1 and sl < entry_price)
+
+                if is_sl_in_profit:
+                    # Logica Step/ATR Trailing se aplică de aici în jos
+                    
+                    # 3. ⚡ STEP TRAILING (Agresiv, doar peste Profit Lock Threshold)
+                    if profit_pips >= profit_lock_threshold and trailing_step_pips > 0:
+                        
+                        trailing_distance = trailing_step_pips * point
+                        sl_new_price = current_price - trailing_distance if order_type == 0 else current_price + trailing_distance
+                        
+                        # Aplicăm Step Trailing DOAR dacă este mai bun decât SL-ul curent
+                        if (order_type == 0 and sl_new_price > sl) or (order_type == 1 and sl_new_price < sl):
+                            new_sl = round(sl_new_price, digits)
+                            self.logger.log(f"⚡ Step Trailing: SL moved by {trailing_step_pips:.1f} pips step to {new_sl:.{digits}f}")
+
+                    # 4. 🔵 ATR TRAILING (Standard)
+                    
+                    # Aplicăm ATR DOAR dacă Step Trailing nu a fost activat
+                    if new_sl is None:
+                        atr_pips = atr_price / pip
+                        atr_trail_distance = atr_pips * atr_mult 
+                        atr_sl_price = current_price - atr_trail_distance * point if order_type == 0 else current_price + atr_trail_distance * point
+                        
+                        # Aplicăm ATR dacă este mai bun (mai conservator/mai aproape de profit) decât SL-ul curent
+                        if (order_type == 0 and atr_sl_price > sl) or (order_type == 1 and atr_sl_price < sl):
+                            new_sl = round(atr_sl_price, digits)
+                            self.logger.log(f"➡️ ATR trailing update to {new_sl:.{digits}f}")
+                
+            # Trimitere Ordin (dacă s-a calculat un nou SL în Blocul 3/4)
             if new_sl and sl != new_sl:
                 self._update_sl(symbol, ticket, new_sl)
             else:
                 self.logger.log(f"ℹ️ No SL change for {symbol}, ticket={ticket} (conditions not met or SL is the same)")
-    
+                
         except Exception as e:
             self.logger.log(f"❌ apply_trailing error for {symbol} ticket={ticket}: {e}")

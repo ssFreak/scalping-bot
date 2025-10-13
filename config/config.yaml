@@ -1,14 +1,14 @@
 general:
   symbols_forex:
-  #- GBPUSD
+  - GBPUSD
   - USDCHF
   - USDCAD
-  #- NZDUSD
-  #- EURGBP
+  - NZDUSD
+  - EURGBP
   - EURCAD
-  #- GBPAUD
+  - GBPAUD
   - AUDJPY
-  #- NZDCAD
+  - NZDCAD
   - CHFJPY
   - EURUSD
   
@@ -94,9 +94,12 @@ general:
         max_positions: 2
         
 trailing:
-  be_min_profit_pips: 30
+  be_min_profit_pips: 40
+  be_secured_pips: 5             
   step_pips: 5
-  atr_multiplier: 2
+  atr_multiplier: 3
+  profit_lock_threshold_pips: 50
+  profit_lock_guarantee_pips: 25
 
 strategies:
   pivot:
@@ -136,15 +139,15 @@ strategies:
     - 13
     - 21
     offset_pips: 1.5                  # ⬇️ Intrare mai rapidă (de la 3)
-    order_expiry_minutes: 15          # ⬇️ Expirare mai rapidă (de la 60)
+    order_expiry_minutes: 60          # ⬇️ Expirare mai rapidă (de la 60)
     atr_period: 12
     atr_method: ema
     rr_target: 2               
     rr_dynamic: false                
     min_atr_pips: 5
     cooldown_minutes: 15            # ⬆️ Cooldown între tranzacții
-    min_bar_length_atr: 0.55        # Lungimea minimă a barei (ca multiplu de ATR)
-    ema_alignment_lookback: 3       # Bare M5 necesare pentru alinierea EMA (8/13/21)
+    min_bar_length_atr: 0.45        # Lungimea minimă a barei (ca multiplu de ATR)
+    ema_alignment_lookback: 2       # Bare M5 necesare pentru alinierea EMA (8/13/21)
     
   momentum_scalping:
     enabled: false

@@ -105,28 +105,31 @@ class EMABreakoutStrategy(BaseStrategy):
         self._pending_expirations[order_ticket] = expiry_limit
         self.logger.log(f"🕒 Pending ticket={order_ticket} va expira manual la {expiry_limit.isoformat()}")
         
-    def _delete_pending_order(self, order_ticket: int) -> bool:
-        """
-        Șterge un ordin pending. Returnează True dacă ordinul a fost anulat SAU dacă nu a fost găsit.
-        Erorile de tip 'Invalid Ticket' (10017) sunt tratate ca succes, indicând o curățare reușită.
-        """
-        # Folosim coduri direct din TradeManager sau MT5Connector, dar le definim aici ca fallback
+    def _delete_pending_order(self, order_ticket: int, symbol: str) -> bool:
+        """Șterge un ordin pending și loghează rezultatul, gestionând erorile de sincronizare."""
+        
+        if not symbol:
+            self.logger.log(f"❌ Cannot delete order {order_ticket}: Symbol is invalid.")
+            return True # Curățăm local pentru a evita bucla infinită
+
         try:
             mt5_done = self.mt5.TRADE_RETCODE_DONE
             mt5_invalid_ticket = self.mt5.TRADE_RETCODE_INVALID_TICKET
         except AttributeError:
-            # Fallback - Coduri numerice MetaTrader standard
             mt5_done = 10009 
             mt5_invalid_ticket = 10017 
             
         request = {
             "action": self.mt5.TRADE_ACTION_REMOVE,
             "order": order_ticket,
+            "symbol": symbol, # 🛑 FIX CRITIC: Include simbolul în request
             "comment": "EMA Breakout manual expiry",
-            "deviation": self.trade_manager.trade_deviation,
+            "deviation": 10,
             "magic": 13931993,
         }
 
+        # Folosim order_send direct (sau safe_order_send dacă este o metodă a clasei TradeManager)
+        # Presupunând că folosim mt5.order_send direct aici
         result = self.mt5.order_send(request)
         retcode = getattr(result, "retcode", -1)
 
@@ -134,9 +137,7 @@ class EMABreakoutStrategy(BaseStrategy):
             self.logger.log(f"✅ Pending Order {order_ticket} anulat cu succes.")
             return True
         elif retcode == mt5_invalid_ticket:
-            # Ordinul nu mai există la broker (a fost executat sau anulat). 
-            # Îl tratăm ca succes pentru curățarea stării locale.
-            self.logger.log(f"⚠️ Pending Order {order_ticket} nu a putut fi anulat (Invalid Ticket / Executat). Curățare reușită.")
+            self.logger.log(f"⚠️ Pending Order {order_ticket} nu a putut fi anulat (Invalid Ticket). Presupunem închis/executat.")
             return True 
         else:
             self.logger.log(f"❌ Eșec anulare Pending Order {order_ticket}. Retcode: {retcode}, Comentariu: {getattr(result, 'comment', '')}")
@@ -144,13 +145,9 @@ class EMABreakoutStrategy(BaseStrategy):
 
     def _check_and_purge_expired_pending(self) -> None:
         """Șterge ordinele pending expirate și curăță cele executate/dispărute."""
-        if not self._pending_expirations:
+        # 🛑 FIX CRITIC: Verificare Symbol Safety 🛑
+        if not self._pending_expirations or not self.symbol:
             return
-
-        # 🛑 FILTRU CRITIC: Asigură-te că simbolul este valid înainte de a interoga MT5
-        if not self.symbol or self.symbol.upper() == 'NONE':
-             self.logger.log(f"❌ [Curățare] Simbol invalid ({self.symbol}). Sărit peste verificare.")
-             return
 
         now_utc = datetime.now(timezone.utc)
         # Ordine active pentru simbol
@@ -158,7 +155,7 @@ class EMABreakoutStrategy(BaseStrategy):
         open_tickets = {int(getattr(o, "ticket", 0)) for o in open_orders}
 
         tickets_to_remove = []
-        for ticket, exp_time in list(self._pending_expirations.items()):
+        for ticket, expiry_time in list(self._pending_expirations.items()):
             # 1. Dacă ordinul nu mai e în lista de Pending a brokerului (a fost executat sau anulat manual)
             if ticket not in open_tickets:
                 self.logger.log(f"ℹ️ Pending Order {ticket} nu mai este activ la broker. Curățare locală.")
@@ -166,13 +163,10 @@ class EMABreakoutStrategy(BaseStrategy):
                 continue
                 
             # 2. Dacă a expirat manual
-            # Folosim diferența de timp simplă (cum e probabil deja implementat)
-            if (now_utc - exp_time).total_seconds() / 60 >= self.order_expiry_minutes:
-                # Încercăm să ștergem ordinul pending
-                if self._delete_pending_order(ticket):
+            if now_utc >= expiry_time:
+                # 🛑 FIX CRITIC: Transmite simbolul explicit
+                if self._delete_pending_order(ticket, self.symbol):
                     tickets_to_remove.append(ticket)
-                # Notă: Dacă _delete_pending_order returnează False (eroare gravă), 
-                # tichetul rămâne în listă pentru a încerca din nou mai târziu.
 
         for t in tickets_to_remove:
             self._pending_expirations.pop(t, None)
@@ -231,7 +225,7 @@ class EMABreakoutStrategy(BaseStrategy):
             safe_exit_end = datetime.strptime("23:59", "%H:%M").time()
 
             if now_time >= safe_exit_start and now_time <= safe_exit_end:
-                self.logger.log(f"⏸️ [Safe Exit] {self.symbol}: Oprire plasarea de noi ordine pending.")
+                self.logger.log(f"⏸️ [Safe Exit] {self.symbol}: Oprind plasarea de noi ordine pending.")
                 pip = float(self.mt5.get_pip_size(self.symbol))
                 self._apply_trailing(0.0, pip)
                 return
@@ -246,19 +240,16 @@ class EMABreakoutStrategy(BaseStrategy):
             if df.empty:
                 return
             
-            # 🟢 NOU: FILTRU NEW BAR GATING (M5)
-            # Verifică ora de deschidere a ultimei lumânări disponibile
+            # 🟢 FILTRU NEW BAR GATING (M5)
             current_bar_time = df["time"].iloc[-1] 
             
             if current_bar_time == self.last_bar_time:
-                # Nu s-a format o nouă bară M5 de la ultima verificare. Sărim.
                 pip = float(self.mt5.get_pip_size(self.symbol))
-                self._apply_trailing(0.0, pip) # Rulează trailing pe pozițiile deschise
+                self._apply_trailing(0.0, pip) 
                 return
                 
-            # Dacă am ajuns aici, o nouă bară M5 s-a deschis. Actualizăm timpul și continuăm.
             self.last_bar_time = current_bar_time
-            #self.logger.log(f"✅ {self.symbol}: New Bar Gating. Rulare logică pe bara M5 deschisă la {current_bar_time}.")
+            self.logger.log(f"✅ {self.symbol}: New Bar Gating. Rulare logică pe bara M5 deschisă la {current_bar_time}.")
 
 
             # Calcul ATR
@@ -314,10 +305,11 @@ class EMABreakoutStrategy(BaseStrategy):
                 pip = float(self.mt5.get_pip_size(self.symbol))
                 self._apply_trailing(0.0, pip)
                 return
-            
-            # --- 🛑 FIX LIMITĂ DE EXPUNERE 🛑 ---
-            
-            # Verificare strictă: dacă există deja un ordin pending al acestei strategii.
+
+            high12 = float(df["high"].iloc[-12:].max())
+            low12 = float(df["low"].iloc[-12:].min())
+
+            # Verificare strictă a ordinelor pending (pentru a nu depăși limita)
             current_orders = self.mt5.orders_get(symbol=self.symbol) or []
             
             if any(getattr(o, "comment", "").startswith(strategy_name_prefix) for o in current_orders):
@@ -332,20 +324,19 @@ class EMABreakoutStrategy(BaseStrategy):
 
             # --- LOGICĂ PLASARE ---
             
-            high5 = float(df["high"].iloc[-5:].max())
-            low5 = float(df["low"].iloc[-5:].min())
-
             rr_factor = self.rr_target # 2.0
 
             if trend == "UP":
-                entry = float(high5 + self.offset_pips * pip)
-                sl = float(low5)
+                # Entry este bazat pe ultimul high (sau High12), dar SL pe Low12
+                entry = float(high12 + self.offset_pips * pip)
+                sl = float(low12)
                 sl_distance_points = entry - sl 
                 tp = entry + rr_factor * sl_distance_points
                 order_type = self.mt5.ORDER_TYPE_BUY_STOP
             elif trend == "DOWN":
-                entry = float(low5 - self.offset_pips * pip)
-                sl = float(high5)
+                # Entry este bazat pe ultimul low (sau Low12), dar SL pe High12
+                entry = float(low12 - self.offset_pips * pip)
+                sl = float(high12)
                 sl_distance_points = sl - entry
                 tp = entry - rr_factor * sl_distance_points
                 order_type = self.mt5.ORDER_TYPE_SELL_STOP
@@ -365,7 +356,7 @@ class EMABreakoutStrategy(BaseStrategy):
                 "price": float(entry),
                 "sl": float(sl),
                 "tp": float(tp),
-                "deviation": self.trade_manager.trade_deviation,
+                "deviation": 10,
                 "magic": 13931993,
                 "comment": strategy_name_prefix,
                 "type_time": self.mt5.ORDER_TIME_GTC,
