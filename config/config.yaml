@@ -1,98 +1,24 @@
 general:
+  # Lista de simboluri pe care strategia activă le va verifica
   symbols_forex:
   - GBPUSD
   - USDCHF
   - USDCAD
-  - NZDUSD
+  - USDJPY
   - EURGBP
-  - EURCAD
-  - GBPAUD
-  - AUDJPY
-  - NZDCAD
-  - CHFJPY
+  - AUDUSD
   - EURUSD
   
-  atr_thresholds_pips:
-    EURUSD:
-      M1: 2.0
-      M5: 5.0
-      H1: 17.0
-    GBPUSD:
-      M1: 2.0
-      M5: 5.0
-      H1: 18.0
-    USDCHF:
-      M1: 1.5
-      M5: 3.5
-      H1: 14.0
-    USDCAD:
-      M1: 1.5
-      M5: 3.5
-      H1: 14.0
-    NZDUSD:
-      M1: 1.2
-      M5: 3.0
-      H1: 11.0
-    EURGBP:
-      M1: 1.0
-      M5: 2.5
-      H1: 8.5
-    EURCAD:
-      M1: 2.5
-      M5: 6.0
-      H1: 21.0
-    GBPAUD:
-      M1: 3.5
-      M5: 8.0
-      H1: 30.0
-    AUDJPY:
-      M1: 2.0
-      M5: 5.0
-      H1: 19.0
-    NZDCAD:
-      M1: 1.5
-      M5: 3.5
-      H1: 13.0
-    CHFJPY:
-      M1: 3.0
-      M5: 7.0
-      H1: 25.0
-  daily_profit: 75.0               # ⬆️ Mărit TP zilnic
-  daily_loss: -50.0                # ⬇️ Redus pierderea zilnică maximă
-  risk_per_trade: 0.005            # ⬇️ RISC CRITIC: 0.5% (de la 1%)
+  # Setările generale ale contului
+  daily_profit: 75.0
+  daily_loss: -50.0
+  risk_per_trade: 0.005 # 0.5% Risc per tranzacție
   max_position_lot: 0.3
   min_free_margin_ratio: 0.6
   deviation: 10
-  trailing_profit_threshold: 15.0
-  thread_monitor_logging: true
-  session_hours:
-  - - 09:00
-    - '23:00'
-  max_equity_risk: 0.1
-  max_drawdown: 0.2
-  exposure_limits:
-    ema_breakout:
-      EURUSD:
-        max_positions: 2
-      USDCHF:
-        max_positions: 2
-      USDCAD:
-        max_positions: 2
-    pivot:
-      EURUSD:
-        max_positions: 2
-      USDCHF:
-        max_positions: 2
-      USDCAD:
-        max_positions: 2
-    ma_ribbon:
-      EURUSD:
-        max_positions: 2
-      USDCHF:
-        max_positions: 2
-      USDCAD:
-        max_positions: 2
-        
+  session_hours: []
+  max_drawdown: 0.2 # Drawdown-ul maxim general al contului
+
 trailing:
   be_min_profit_pips: 40
   be_secured_pips: 5             
@@ -102,70 +28,79 @@ trailing:
   profit_lock_guarantee_pips: 25
 
 strategies:
-  pivot:
-    enabled: false
-    timeframe: M1
-    pivot_levels:
-    - S1
-    - R1
-    atr_period: 12
-    atr_method: ema
-    tp_atr_multiplier: 3
-    sl_atr_multiplier: 2.5
-    volume_lookback: 20
-    min_volume_multiplier: 1.2
-    cooldown_minutes: 5
+  ema_rsi_scalper:
+    enabled: true   
+    magic_number_base: 19133000
     
-  moving_average_ribbon:
-    enabled: false
-    timeframe: M5
-    sma_periods:
-    - 5
-    - 8
-    - 13
-    atr_period: 12
-    atr_method: ema
-    tp_atr_multiplier: 1.5
-    sl_atr_multiplier: 2.5
-    volume_lookback: 20
-    min_volume_multiplier: 1.2
-    cooldown_minutes: 5
-    
-  ema_breakout:
-    enabled: true
-    timeframe: M5
-    ema_periods:
-    - 8
-    - 13
-    - 21
-    offset_pips: 1.5                  # ⬇️ Intrare mai rapidă (de la 3)
-    order_expiry_minutes: 60          # ⬇️ Expirare mai rapidă (de la 60)
-    atr_period: 12
-    atr_method: ema
-    rr_target: 2               
-    rr_dynamic: false                
-    min_atr_pips: 5
-    cooldown_minutes: 15            # ⬆️ Cooldown între tranzacții
-    min_bar_length_atr: 0.45        # Lungimea minimă a barei (ca multiplu de ATR)
-    ema_alignment_lookback: 2       # Bare M5 necesare pentru alinierea EMA (8/13/21)
-    
-  momentum_scalping:
-    enabled: false
-    timeframe: M1
-    rsi_period: 14
-    macd_fast: 12
-    macd_slow: 26
-    macd_signal: 9
-    atr_period: 12
-    atr_method: ema
-    tp_atr_multiplier: 1.5
-    sl_atr_multiplier: 2.0
-    
-  ema_crossover:
-    enabled: false
-  ema_rsi_filter:
-    enabled: false
-  linear_regression:
-    enabled: false
-  rmi_supertrend:
-    enabled: false
+    # Parametrii ficși (comuni) stabiliți în urma testării
+    timeframe: 'M5'
+    h1_ema_period: 50
+    m5_atr_period: 14
+    m5_rsi_period: 14
+
+    # --- PARAMETRI SPECIFICI PER SIMBOL ---
+    # Doar simbolurile setate pe 'enabled: true' aici vor rula.
+    symbol_settings:
+      EURUSD:
+        enabled: true
+        magic_number_offset: 1
+        rr_target: 2.3605
+        sl_atr_multiplier: 2.219
+        rsi_oversold: 22
+        rsi_overbought: 85
+
+      GBPUSD:
+        enabled: tru
+        magic_number_offset: 2 
+        rr_target: 3.4279
+        sl_atr_multiplier: 2.3478
+        rsi_oversold: 19
+        rsi_overbought: 80
+
+      USDCHF:
+        enabled: true
+        magic_number_offset: 3
+        rr_target: 1.0560
+        sl_atr_multiplier: 3.0641
+        rsi_oversold: 19
+        rsi_overbought: 84
+
+      USDCAD:
+        enabled: true
+        magic_number_offset: 4
+        rr_target: 1.1447
+        sl_atr_multiplier: 3.048
+        rsi_oversold: 15
+        rsi_overbought: 83
+        
+      USDJPY:
+        enabled: true
+        magic_number_offset: 5
+        rr_target: 3.2646
+        sl_atr_multiplier: 4.1034
+        rsi_oversold: 16
+        rsi_overbought: 85
+
+      EURGBP:
+        enabled: false
+        magic_number_offset: 6
+        rr_target: 1.5
+        sl_atr_multiplier: 2.0
+        rsi_oversold: 30
+        rsi_overbought: 70
+        
+      AUDUSD:
+        enabled: true
+        magic_number_offset: 7
+        rr_target: 1.495
+        sl_atr_multiplier: 1.2656
+        rsi_oversold: 15
+        rsi_overbought: 84
+        
+      NZDUSD:
+        enabled: true
+        magic_number_offset: 8
+        rr_target: 1.1135
+        sl_atr_multiplier: 1.756
+        rsi_oversold: 17
+        rsi_overbought: 85

@@ -1,34 +1,39 @@
 import threading
-import time
-
+import traceback
 
 class BaseStrategy:
-    def __init__(self, symbol, config, logger, risk_manager, trade_manager, mt5_connector, stop_event=None):
+    def __init__(self, symbol: str, config: dict, broker_context):
         self.symbol = symbol
         self.config = config
-        self.logger = logger
-        self.risk_manager = risk_manager
-        self.trade_manager = trade_manager
-        self.mt5 = mt5_connector
-        self.stop_event = stop_event or threading.Event()
+        self.broker = broker_context
+        self.logger = self.broker.logger
+        self.magic_number = int(self.config.get("magic_number", 0))
+        self.stop_event = threading.Event()
+
+        if self.magic_number == 0:
+            self.logger.log(f"⚠️ Strategia pentru {self.symbol} nu are un magic_number valid!", "warning")
 
     def run_threaded(self):
         name = self.__class__.__name__
         self.logger.log(f"🧵 Start {name} {self.symbol}")
         try:
             while not self.stop_event.is_set():
-                if self.risk_manager.can_trade(verbose=True):
+                # === MODIFICARE PENTRU DEBUGGING ===
+                # Adăugăm verbose=True pentru a obține loguri de diagnostic la fiecare verificare
+                if self.broker.can_trade(verbose=False):
                     self.run_once()
-                # pace
+                
                 if self.stop_event.wait(timeout=5):
                     break
         except Exception as e:
-            self.logger.log(f"❌ Fatal error in {name}({self.symbol}): {e}")
+            trace = traceback.format_exc()
+            self.logger.log(f"❌ Eroare fatală în {name}({self.symbol}): {e}", "error")
+            self.logger.log(f"🔍 Stack Trace: {trace}", "debug")
         finally:
             self.logger.log(f"🧵 Stop {name} {self.symbol}")
 
     def run_once(self):
-        raise NotImplementedError("Subclasses must implement run_once()")
+        raise NotImplementedError("Subclasele trebuie să implementeze run_once()")
 
     def stop(self):
         self.stop_event.set()

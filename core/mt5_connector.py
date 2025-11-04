@@ -93,6 +93,18 @@ class MT5Connector:
         # Unele build-uri MetaTrader5 pentru Python NU expun mt5.SYMBOL_EXPIRATION_MODE.
         # Ca să nu crape strategiile, oferim o cheie "virtuală" pe care o rezolvăm în wrapperul symbol_info_integer.
         self.SYMBOL_EXPIRATION_MODE = "_WRAP_EXPIRATION_MODE_"
+        
+    def _resolve_timeframe(self, timeframe):
+        """
+        Convertește un string (ex: 'M5') sau un număr în constanta MT5 corespunzătoare.
+        """
+        if isinstance(timeframe, str):
+            tf_upper = timeframe.upper()
+            return getattr(self.mt5, f"TIMEFRAME_{tf_upper}", None)
+        # Dacă este deja un număr (formatul corect), îl returnăm ca atare
+        elif isinstance(timeframe, int):
+            return timeframe
+        return None
 
     # --- account
     def get_account_info(self):
@@ -114,10 +126,19 @@ class MT5Connector:
 
     # --- market data
     def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
-        return self.mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count) if self.mt5 else None
+        # Convertim timeframe-ul înainte de a apela funcția MT5
+        resolved_tf = self._resolve_timeframe(timeframe)
+        if resolved_tf is None:
+            self.logger.log(f"❌ Timeframe invalid: {timeframe}", "error")
+            return None
+        return self.mt5.copy_rates_from_pos(symbol, resolved_tf, start_pos, count) if self.mt5 else None
 
     def copy_rates_range(self, symbol, timeframe, date_from, date_to):
-        return self.mt5.copy_rates_range(symbol, timeframe, date_from, date_to) if self.mt5 else None
+        resolved_tf = self._resolve_timeframe(timeframe)
+        if resolved_tf is None:
+            self.logger.log(f"❌ Timeframe invalid: {timeframe}", "error")
+            return None
+        return self.mt5.copy_rates_range(symbol, resolved_tf, date_from, date_to) if self.mt5 else None
 
     # wrapper comod, des folosit în proiect
     def get_rates(self, symbol, timeframe, count):
@@ -149,22 +170,6 @@ class MT5Connector:
                     self.logger.log(f"⚠️ order_send pentru {symbol} a eșuat (retcode={result.retcode}, comment={getattr(result, 'comment', '')})")
                  # Nu logăm succesul modificării SL/TP, pentru a nu umple logul.
             return result
-
-
-        # --- Logică pentru TRADE_ACTION_DEAL și TRADE_ACTION_PENDING (Cele care necesită Filling Mode) ---
-        
-        # Daca modul de umplere al cererii nu corespunde modului simbolului
-        if info.filling_mode != request.get("type_filling"):
-            # Aici se declanșa avertismentul fals
-            if self.logger:
-                self.logger.log(f"⚠️ Filling mode {request.get('type_filling')} "
-                                f"nu este suportat pentru {symbol}, "
-                                f"fallback la ORDER_FILLING_RETURN")
-            
-            # Se aplica fallback-ul doar daca este o actiune DEAL sau PENDING
-            request["type_filling"] = self.ORDER_FILLING_RETURN
-            
-        # 🛑 END CORECȚIE FINALĂ 🛑
         
         result = self.mt5.order_send(request)
 
@@ -221,15 +226,19 @@ class MT5Connector:
 
     # --- pips util
     def get_pip_size(self, symbol):
-        """
-        Returnează dimensiunea unui PIP pentru simbol:
-          - digits=5/4 -> 0.0001 (majore cu 4/5 zecimale)
-          - digits=3/2 -> 0.01   (JPY etc.)
-        """
+        info = self.get_symbol_info(symbol)
+        if not info: return 0.0001
+        # Corectat: 0.01 pt JPY (3 zecimale), 0.0001 pt EURUSD (5 zecimale)
+        return 0.01 if info.digits == 3 else 0.0001
+
+    # --- METODA NOUĂ (DE ADĂUGAT) ---
+    def get_digits(self, symbol: str) -> int:
+        """Returnează numărul de zecimale pentru rotunjirea prețului."""
         info = self.get_symbol_info(symbol)
         if not info:
-            return 0.0001
-        return 10 ** (-(info.digits - 1))
+            return 5 # Valoare implicită sigură
+        return info.digits
+    # ------------------------------
 
     # --- shutdown
     def shutdown(self):
