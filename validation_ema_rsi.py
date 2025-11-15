@@ -119,7 +119,7 @@ def run_validation_backtest(config, data_paths, symbol, strategy_class, strategy
 if __name__ == "__main__":
     
     # --- EDITEAZĂ AICI ---
-    SYMBOL_TO_TEST = "NZDUSD"
+    SYMBOL_TO_TEST = "EURGBP"
     STRATEGY_TO_TEST = EMARsiTrendScalper
     STRATEGY_NAME_KEY = "ema_rsi_scalper" # Numele exact din config.yaml
     # ---------------------

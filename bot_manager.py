@@ -11,9 +11,10 @@ from managers.risk_manager import RiskManager
 from core.logger import Logger
 from core.broker_context import LiveBrokerContext
 
-# Importăm doar strategia de care avem nevoie
+# Importăm DOAR strategiile de care avem nevoie
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
-# Adaugă aici 'from strategies.simple_rsi_scalper import SimpleRsiScalper' dacă o vei folosi
+from strategies.base_strategy import BaseStrategy 
+# (Asigură-te că fișierul base_strategy.py este cel corect)
 
 class BotManager:
     def __init__(self, config_path="config/config.yaml"):
@@ -53,6 +54,7 @@ class BotManager:
 
         strategy_map = {
             "ema_rsi_scalper": EMARsiTrendScalper
+            # Adaugă aici alte strategii (ex: "pinbar": PinBarStrategy)
         }
 
         for strategy_name, base_config in strategy_configs.items():
@@ -108,8 +110,13 @@ class BotManager:
         self.logger.log("✅ Bot oprit complet.")
 
     def _monitor(self):
-        """Thread separat pentru verificări globale (drawdown, weekend)."""
+        """
+        Thread separat pentru verificări globale (drawdown, weekend) 
+        ȘI pentru logarea centralizată a stării.
+        """
         while not self.stop_event.is_set():
+            
+            # Logăm starea 'can_trade' centralizat (ex: o dată pe oră)
             self.risk_manager.can_trade(verbose=True)
             
             if self.risk_manager.check_drawdown_breach():
@@ -122,7 +129,8 @@ class BotManager:
                 self.trade_manager.close_all_trades()
                 self.stop(); break
 
-            if self.stop_event.wait(timeout=60): break
+            if self.stop_event.wait(timeout=60):
+                break
 
     def stop(self, *args):
         """Oprește toate strategiile și thread-ul principal."""

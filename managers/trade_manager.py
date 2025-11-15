@@ -1,3 +1,4 @@
+# managers/trade_manager.py
 import traceback
 from datetime import datetime
 import numpy as np
@@ -30,20 +31,20 @@ class TradeManager:
                 position = p
                 break
         if not position: return False
-
-        # Obținem numărul corect de zecimale pentru JPY-safe
+        
         digits = self.mt5.get_digits(symbol)
 
         request = {
             "action": self.mt5.TRADE_ACTION_SLTP,
             "symbol": symbol,
             "position": ticket,
-            "sl": float(np.round(new_sl, digits)), # Folosim digits
+            "sl": float(np.round(new_sl, digits)), # JPY-safe
             "tp": position.tp,
             "magic": magic_number,
             "comment": "Update SL",
         }
         result = self.mt5.order_send(request)
+        
         if result is None:
             self.logger.log(f"❌ Eșec actualizare SL pentru {symbol}: order_send a returnat None", "error")
             return False
@@ -103,7 +104,7 @@ class TradeManager:
         return True
 
 
-    def open_trade(self, symbol, order_type, lot, sl, tp, deviation_points, magic_number, comment=""):
+    def open_trade(self, symbol, order_type, lot, sl, tp, deviation_points, magic_number, comment="", ml_features=None):
         if not self._ensure_symbol(symbol): return None
         tick = self.mt5.get_symbol_info_tick(symbol)
         if tick is None:
@@ -112,10 +113,9 @@ class TradeManager:
 
         price = tick.ask if order_type == self.mt5.ORDER_TYPE_BUY else tick.bid
         
-        # --- CORECȚIA CRITICĂ: Folosim IOC în loc de RETURN ---
+        # Corecția pentru Eroarea 10030
         filling_type = self.mt5.ORDER_FILLING_IOC 
         
-        # Obținem numărul corect de zecimale pentru JPY-safe
         digits = self.mt5.get_digits(symbol) 
 
         request = {
@@ -124,12 +124,12 @@ class TradeManager:
             "volume": float(lot),
             "type": order_type,
             "price": float(price),
-            "sl": float(np.round(sl, digits)), # Rotunjire JPY-safe
-            "tp": float(np.round(tp, digits)), # Rotunjire JPY-safe
+            "sl": float(np.round(sl, digits)), # Corecție JPY-safe
+            "tp": float(np.round(tp, digits)), # Corecție JPY-safe
             "deviation": self.trade_deviation,
             "magic": magic_number,
             "comment": comment,
-            "type_filling": filling_type, # Folosim IOC
+            "type_filling": filling_type,
         }
 
         result = self.safe_order_send(request, f"open {symbol}")
@@ -137,7 +137,13 @@ class TradeManager:
         if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
             ticket = getattr(result, "order", 0)
             order_type_str = "BUY" if order_type == self.mt5.ORDER_TYPE_BUY else "SELL"
-            self.logger.log_position(ticket=ticket, symbol=symbol, order_type=order_type_str, lot_size=lot, entry_price=price, sl=sl, tp=tp, comment=comment, closed=False)
+            
+            # Trimitem datele ML către logger
+            self.logger.log_position(
+                ticket=ticket, symbol=symbol, order_type=order_type_str, 
+                lot_size=lot, entry_price=price, sl=sl, tp=tp, 
+                comment=comment, closed=False, ml_features=ml_features
+            )
 
         return result
 
@@ -163,17 +169,89 @@ class TradeManager:
             "deviation": self.trade_deviation,
             "magic": magic_number,
             "comment": "Close trade",
-            "type_filling": self.mt5.ORDER_FILLING_IOC, # Adăugat și aici
+            "type_filling": self.mt5.ORDER_FILLING_IOC, # Corecție Filling Mode
         }
         result = self.safe_order_send(request, f"close {symbol}")
         
         if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
-            self.logger.log_position(ticket=ticket, symbol=symbol, order_type="CLOSE", lot_size=pos.volume, entry_price=price, sl=pos.sl, tp=pos.tp, comment=f"Closed ticket {ticket}", closed=True, exit_price=price)
+            # La închidere, actualizăm rândul existent
+            self.logger.log_position(
+                ticket=ticket, symbol=symbol, order_type="CLOSE", 
+                lot_size=pos.volume, entry_price=price, sl=pos.sl, tp=pos.tp, 
+                comment=f"Closed ticket {ticket}", closed=True, exit_price=price
+            )
 
         return result
 
     def apply_trailing(self, symbol, position, atr_price: float, pip: float, params: dict):
-        # ... (Logica ta de trailing stop) ...
-        # Asigură-te că apelezi _update_sl cu toți parametrii:
-        # self._update_sl(symbol, ticket, new_sl, magic_number)
-        pass
+        """
+        Aplică logica de trailing stop / break-even.
+        """
+        try:
+            ticket = position.ticket
+            entry_price = position.price_open
+            sl = position.sl
+            order_type = position.type  # 0=buy, 1=sell
+            magic_number = position.magic # Preluăm magic_number-ul poziției
+            
+            info = self.mt5.get_symbol_info(symbol)
+            tick = self.mt5.get_symbol_info_tick(symbol)
+            if info is None or tick is None: return
+            
+            point = info.point
+            digits = info.digits
+            current_price = tick.bid if order_type == 0 else tick.ask
+            
+            profit_pips = (current_price - entry_price) / point if order_type == 0 else (entry_price - current_price) / point
+            
+            # Verificăm dacă logul de trailing este activat în configul general
+            if self.config.get("general", {}).get("log_trailing", False):
+                 self.logger.log(f"🔍 Trailing check {symbol} ticket={ticket} profit={profit_pips:.1f} pips (SL={sl}, TP={position.tp})")
+            
+            be_min_profit = params.get("be_min_profit_pips", 20)
+            be_secured_pips = params.get("be_secured_pips", 5.0) 
+            
+            profit_lock_threshold = params.get("profit_lock_threshold_pips", 50.0)
+            profit_lock_guarantee = params.get("profit_lock_guarantee_pips", 15.0)
+
+            new_sl = None
+            
+            if profit_pips > 0:
+                sl_target_pips = None
+                
+                # 1. Verificăm Profit Lock Absolut
+                if profit_pips >= profit_lock_threshold:
+                    sl_target_pips = profit_lock_guarantee
+                # 2. Verificăm Break-Even
+                elif profit_pips >= be_min_profit:
+                    sl_target_pips = be_secured_pips
+                
+                if sl_target_pips is not None:
+                    sl_lock_price = entry_price + sl_target_pips * point if order_type == 0 else entry_price - sl_target_pips * point
+                    
+                    if (order_type == 0 and (sl is None or sl < sl_lock_price)) or \
+                       (order_type == 1 and (sl is None or sl > sl_lock_price)):
+                        
+                        new_sl = round(sl_lock_price, digits)
+                        self.logger.log(f"➡️ [{symbol}] Mutare SL la profit garantat: {sl_target_pips:.1f} pips.")
+                        self._update_sl(symbol, ticket, new_sl, magic_number) 
+                        return
+                
+                # 3. Logica de Trailing dinamic (dacă e activată și SL e deja pe profit)
+                is_sl_in_profit = (order_type == 0 and sl is not None and sl > entry_price) or \
+                                  (order_type == 1 and sl is not None and sl < entry_price)
+                
+                trailing_step_pips = params.get("step_pips", 0)
+                
+                if is_sl_in_profit and trailing_step_pips > 0:
+                    trailing_distance = trailing_step_pips * point
+                    sl_new_price = current_price - trailing_distance if order_type == 0 else current_price + trailing_distance
+                    
+                    if (order_type == 0 and sl_new_price > sl) or (order_type == 1 and sl_new_price < sl):
+                        new_sl = round(sl_new_price, digits)
+                        self.logger.log(f"⚡ [{symbol}] Step Trailing: SL mutat la {new_sl:.{digits}f}")
+                        self._update_sl(symbol, ticket, new_sl, magic_number) 
+                        return
+                
+        except Exception as e:
+            self.logger.log(f"❌ apply_trailing error for {symbol} ticket={ticket}: {e}", "error")

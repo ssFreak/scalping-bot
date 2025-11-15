@@ -23,7 +23,6 @@ class LiveBrokerContext:
         if rates is None:
             self.logger.log(f"Eroare: get_rates a returnat None pentru {symbol} {timeframe}", "error")
             return None
-        
         try:
             df = pd.DataFrame(rates)
             df['datetime'] = pd.to_datetime(df['time'], unit='s')
@@ -36,15 +35,13 @@ class LiveBrokerContext:
     def get_open_positions(self, symbol: str, magic_number: int):
         """Returnează pozițiile deschise filtrate după simbol și magic number."""
         all_positions = self.mt5.positions_get(symbol=symbol)
-        if not all_positions:
-            return []
+        if not all_positions: return []
         return [p for p in all_positions if p.magic == magic_number]
 
     def get_pending_orders(self, symbol: str, magic_number: int):
         """Returnează ordinele în așteptare filtrate după simbol și magic number."""
         all_orders = self.mt5.orders_get(symbol=symbol)
-        if not all_orders:
-            return []
+        if not all_orders: return []
         return [o for o in all_orders if o.magic == magic_number]
         
     def get_pip_size(self, symbol: str) -> float:
@@ -55,16 +52,18 @@ class LiveBrokerContext:
         """Pasează apelul către connectorul MT5 pentru a obține nr. de zecimale."""
         return self.mt5.get_digits(symbol)
 
-    def open_market_order(self, symbol, order_type, lot, sl, tp, magic_number, comment=""):
-        """Plasează un ordin la piață."""
+    def open_market_order(self, symbol, order_type, lot, sl, tp, magic_number, comment="", ml_features=None):
+        """Plasează un ordin la piață, pasând și datele ML."""
         if not self.risk_manager.check_free_margin(symbol, lot, order_type):
             self.logger.log(f"BrokerContext: Marjă insuficientă pentru {symbol} lot={lot}.")
             return None
             
+        # Îl pasăm mai departe către trade_manager
         return self.trade_manager.open_trade(
             symbol=symbol, order_type=order_type, lot=lot, sl=sl, tp=tp,
             deviation_points=self.trade_manager.trade_deviation,
-            magic_number=magic_number, comment=comment
+            magic_number=magic_number, comment=comment,
+            ml_features=ml_features # Aici
         )
 
     def place_pending_order(self, request: dict):
