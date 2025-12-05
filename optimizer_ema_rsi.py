@@ -1,211 +1,224 @@
-# optimizer_ema_rsi.py
-# VERSIUNE BATCH PENTRU PORTOFOLIU
-# 
-# Acest script va rula optimizarea secvențial pentru FIECARE 
-# simbol din lista 'SYMBOLS_TO_OPTIMIZE'.
-# 
+# optimizer_ema_rsi.py - CLEAN & FULL SYMBOLS (M5/H1)
 
 import pandas as pd
 import yaml
 import optuna
 import copy
 import sys
-import traceback # Importăm pentru a afișa erori
-
-# --- Importăm clasele necesare ---
+import traceback
+import os
 from core.backtest_broker import BacktestBroker
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
 
-# --- Funcțiile de pre-procesare (neschimbate) ---
+# --- 1. Funcții Helper pentru Date ---
 
 def load_and_prepare_data(file_path):
+    """Încarcă datele din CSV (Format MT5 Export)."""
     try:
         data = pd.read_csv(file_path, header=0, sep='\t')
+        # Renumire coloane standard
         data.rename(columns={'<DATE>': 'date', '<TIME>': 'time', '<OPEN>': 'open', '<HIGH>': 'high', '<LOW>': 'low', '<CLOSE>': 'close'}, inplace=True)
+        # Parsare datetime
         data['datetime'] = pd.to_datetime(data['date'] + ' ' + data['time'], format='%Y.%m.%d %H:%M:%S')
         data.set_index('datetime', inplace=True)
+        # Eliminare timezone pentru compatibilitate
         data.index = data.index.tz_localize(None)
         return data[['open', 'high', 'low', 'close']].copy()
     except Exception as e:
         print(f"EROARE la încărcarea {file_path}: {e}")
         return None
 
-def preprocess_data_ema(data_paths, symbol, h1_ema_period, m5_atr_period, m5_rsi_period):
-    """Funcție de pre-procesare specifică pentru EMARsiTrendScalper."""
-    print(f"[INFO] Început pre-procesare EMA pentru {symbol}...")
-    df_m5 = load_and_prepare_data(data_paths['M5'])
-    df_h1 = load_and_prepare_data(data_paths['H1'])
-    if df_m5 is None or df_h1 is None:
-        raise FileNotFoundError(f"Datele M5 sau H1 nu au putut fi încărcate pentru {symbol}")
-
-    print(f"[INFO] Calculare indicatori H1 (EMA {h1_ema_period})...")
-    df_h1['H1_ema_trend'] = df_h1['close'].ewm(span=h1_ema_period, adjust=False).mean()
-    df_h1['H1_trend_up'] = df_h1['close'] > df_h1['H1_ema_trend']
-    df_h1_to_merge = df_h1[['H1_trend_up']] 
-
-    print(f"[INFO] Calculare indicatori M5 (RSI {m5_rsi_period}, ATR {m5_atr_period})...")
-    df_m5['M5_atr'] = EMARsiTrendScalper._calculate_atr(df_m5, m5_atr_period, 'ema')
-    df_m5['M5_rsi'] = EMARsiTrendScalper._calculate_rsi(df_m5, m5_rsi_period)
+def preprocess_data_static(data_paths, symbol, config):
+    """
+    Calculează indicatorii o singură dată (Perioade FIXE).
+    Optimizarea se face pe PRAGURI, nu pe perioade, pentru eficiență maximă.
+    """
+    print(f"[INFO] Pre-procesare date {symbol} (M5/H1)...")
     
-    print(f"[INFO] Unire date M5 și H1 pentru {symbol}...")
+    # 1. Extragem perioadele FIXE din config
+    ema_period = config.get('ema_period', 50)
+    atr_period = config.get('atr_period', 14)
+    rsi_period = config.get('rsi_period', 14)
+    
+    df_base = load_and_prepare_data(data_paths['M5']) # Timeframe BAZĂ (Execuție)
+    df_trend = load_and_prepare_data(data_paths['H1']) # Timeframe TREND (Filtru)
+    
+    if df_base is None or df_trend is None:
+        raise FileNotFoundError(f"Date lipsă pentru {symbol}")
+
+    # 2. Calculăm Indicatorii
+    # Trend (H1) -> EMA 50
+    df_trend['H1_ema_trend'] = df_trend['close'].ewm(span=ema_period, adjust=False).mean()
+    df_trend['H1_trend_up'] = df_trend['close'] > df_trend['H1_ema_trend']
+    
+    # Semnal (M5) -> RSI, ATR
+    df_base['M5_atr'] = EMARsiTrendScalper._calculate_atr(df_base, atr_period, 'ema')
+    df_base['M5_rsi'] = EMARsiTrendScalper._calculate_rsi(df_base, rsi_period)
+    
+    # 3. Merge (Aliniere date H1 pe M5)
+    df_trend_merge = df_trend[['H1_trend_up']]
     combined_df = pd.merge_asof(
-        df_m5,
-        df_h1_to_merge,
-        left_index=True,
-        right_index=True,
+        df_base, df_trend_merge,
+        left_index=True, right_index=True,
         direction='backward'
     )
     combined_df.dropna(inplace=True)
-    print(f"[INFO] Pre-procesare finalizată pentru {symbol}.")
     return combined_df
 
-# --- Funcția Objective (neschimbată) ---
+# --- 2. Funcția Obiectiv (Optuna) ---
+
 def objective(trial, base_config, symbol, max_allowed_drawdown, processed_data):
+    # 1. Configurare Mediu
+    # Deepcopy pentru a nu altera config-ul original între trial-uri
     temp_config = copy.deepcopy(base_config)
-    strategy_config = temp_config['strategies']['ema_rsi_scalper']
+    strategy_conf = temp_config['strategies']['ema_rsi_scalper']
 
-    strategy_config['rr_target'] = trial.suggest_float('rr_target', 1.0, 4.0)
-    strategy_config['sl_atr_multiplier'] = trial.suggest_float('sl_atr_multiplier', 1.0, 5.0)
-    strategy_config['rsi_oversold'] = trial.suggest_int('rsi_oversold', 15, 35)
-    strategy_config['rsi_overbought'] = trial.suggest_int('rsi_overbought', 65, 85)
-    strategy_config['timeframe'] = 'M5'
-
-    broker = BacktestBroker(processed_data=processed_data, config=temp_config, initial_equity=200.0)
-    strategy = EMARsiTrendScalper(symbol=symbol, config=strategy_config, broker_context=broker)
-
-    while broker.advance_time():
-        strategy.run_once(current_bar=broker.get_current_bar_data())
-
-    results = broker.generate_report()
+    # === 2. SPAȚIUL DE CĂUTARE (Parametri Dinamici) ===
     
-    profit_factor = results["profit_factor"]
-    max_drawdown = results["max_drawdown"]
-    total_trades = results["total_trades"]
-
-    if total_trades < 50 or max_drawdown > max_allowed_drawdown:
-        if trial.number % 10 == 0:
-            print(f"[WARN] Trial {trial.number} eșuat: Trades={total_trades}, DD={max_drawdown:.2f}%")
-        return - (max_drawdown / max_allowed_drawdown) if max_drawdown > 0 else -1.0
+    # A. Management Risc (Adaptare la volatilitate)
+    # Cât "spațiu" dăm tranzacției (SL) și cât cerem (TP)
+    strategy_conf['sl_atr_multiplier'] = trial.suggest_float('sl_atr_multiplier', 1.0, 3.0, step=0.1)
+    strategy_conf['rr_target'] = trial.suggest_float('rr_target', 1.0, 3.0, step=0.1)
     
-    # Afișăm un log la fiecare 10 trial-uri reușite
-    if trial.number % 10 == 0:
-        print(f"[INFO] Trial {trial.number} OK: PF={profit_factor:.2f}, DD={max_drawdown:.2f}%, Trades={total_trades}")
-    return profit_factor
+    # B. Intrare (Sensibilitate și Filtre)
+    # Praguri RSI: Cât de extrem trebuie să fie semnalul?
+    strategy_conf['rsi_oversold'] = trial.suggest_int('rsi_oversold', 20, 35, step=5)
+    strategy_conf['rsi_overbought'] = trial.suggest_int('rsi_overbought', 65, 80, step=5)
+    
+    # Filtru Proximitate EMA: Critic pentru diferența dintre perechi calme vs. volatile
+    # EURUSD poate vrea 4-6 pips, GBPJPY poate vrea 10-12 pips
+    strategy_conf['ema_distance_pips'] = trial.suggest_float('ema_distance_pips', 3.0, 12.0, step=1.0)
+    
+    # C. Ieșire (Profit Lock / Trailing)
+    # Cât de agresiv securizăm profitul pe parcurs?
+    temp_config['trailing']['profit_lock_percent'] = trial.suggest_float('profit_lock_percent', 0.6, 0.9, step=0.05)
+    
+    # === 3. PARAMETRI STATICI (Fixați) ===
+    # Asigurăm timeframe-urile corecte (M5/H1) conform strategiei
+    strategy_conf['timeframe'] = 'M5'
+    strategy_conf['timeframe_trend'] = 'H1'
+    # Perioadele (50, 14, 14) sunt deja "arse" în processed_data, deci nu le modificăm aici.
 
+    # === 4. RULARE BACKTEST ===
+    broker = BacktestBroker(config=temp_config, initial_equity=1000.0)
+    strategy = EMARsiTrendScalper(symbol=symbol, config=strategy_conf, broker_context=broker)
+    
+    # Iterăm prin datele pre-procesate (Execuție Rapidă)
+    for index, row in processed_data.iterrows():
+        # Setăm datele curente în broker
+        broker.set_current_data(index, {symbol: row})
+        # Rulăm logica strategiei (care citește H1_trend_up, M5_rsi etc. din row)
+        strategy.run_once(current_bar=row)
+        # Actualizăm pozițiile
+        broker.update_all_positions()
 
-# --- BLOCUL PRINCIPAL (MODIFICAT PENTRU A RULA ÎN BUCLĂ) ---
+    # === 5. EVALUARE & PENALIZĂRI ===
+    # Scriem raportul într-un fișier "junk" care se suprascrie la fiecare iterație
+    junk_file = "temp_opt_junk.txt"
+    report = broker.generate_portfolio_report([symbol], report_filename=junk_file)
+    
+    pf = report.get("profit_factor", 0.0)
+    dd = report.get("max_drawdown_pct", 100.0)
+    trades = report.get("total_trades", 0)
+
+    # Penalizări pentru rezultate invalide statistic
+    if trades < 30: 
+        return 0.0      # Prea puține tranzacții pentru a fi relevant
+    if dd > max_allowed_drawdown: 
+        return -dd      # Penalizare directă cu valoarea Drawdown-ului dacă depășește limita
+    
+    # Obiectivul este maximizarea Profit Factor-ului
+    return pf
+
+# --- 3. Main Loop ---
+
 if __name__ == "__main__":
     
-    # --- Setări Globale pentru Optimizare ---
+    # LISTA COMPLETĂ DE SIMBOLURI
     SYMBOLS_TO_OPTIMIZE = [
-        "EURUSD",
-        "GBPUSD",
-        "USDCAD",
-        "USDCHF",
-        "USDJPY",
-        "AUDUSD",
-        "NZDUSD",
-        "AUDJPY",
-        "EURJPY",
-        "EURGBP",
-        "GBPJPY" 
+        "EURUSD", "GBPUSD", "USDCAD", "USDCHF", "USDJPY",
+        "AUDUSD", "NZDUSD", "AUDJPY", "EURJPY", "EURGBP", "GBPJPY"
     ]
-    MAX_DRAWDOWN_LIMIT = 30.0
-    TOTAL_TRIALS_PER_SYMBOL = 250 # Numărul de teste pentru fiecare simbol
-    DATA_SUFFIX = "_1Y" # Folosim datele de 1 An pentru optimizare
-    # ----------------------------------------
     
-    with open("config/config.yaml", 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
+    MAX_DRAWDOWN_LIMIT = 25.0 # Maxim acceptat 25% DD
+    TOTAL_TRIALS = 250        # Număr teste per simbol
+    
+    # Încărcare Config de Bază
+    try:
+        with open("config/config.yaml", 'r', encoding='utf-8') as f:
+            base_config = yaml.safe_load(f)
+    except FileNotFoundError:
+        print("❌ EROARE: config/config.yaml nu a fost găsit.")
+        sys.exit(1)
 
-    # Listă pentru a stoca rezultatele finale
     all_best_results = []
     
-    print("="*50)
-    print(f"Început Optimizare Portofoliu (Batch) pentru {len(SYMBOLS_TO_OPTIMIZE)} simboluri.")
-    print(f"Total Teste per Simbol: {TOTAL_TRIALS_PER_SYMBOL}")
-    print("="*50)
-
-    # --- BUCLA PRINCIPALĂ ---
+    print(f"🚀 Pornire Optimizare pentru {len(SYMBOLS_TO_OPTIMIZE)} simboluri.")
+    
     for symbol in SYMBOLS_TO_OPTIMIZE:
+        print("\n" + "="*60)
+        print(f"📊 Optimizare: {symbol}")
+        print("="*60)
         
-        print("\n" + "="*50)
-        print(f"--- Procesare Simbol: {symbol} ---")
-        print("="*50)
-
-        DATA_PATHS = {
-            "M5": f"data/{symbol}_M5{DATA_SUFFIX}.csv",
-            "H1": f"data/{symbol}_H1{DATA_SUFFIX}.csv"
+        # Căi fișiere (Asigură-te că ai datele _9Y.csv sau _2Y.csv în folder)
+        # Aici presupunem _2Y pentru optimizare (mai rapid) sau poți schimba în _9Y
+        paths = {
+            "M5": f"data/{symbol}_M5_2Y.csv",
+            "H1": f"data/{symbol}_H1_2Y.csv"
         }
         
-        study_name = f"ema_rsi_m5_{symbol}_v1" # Nume unic pentru studiu
-        storage_name = "sqlite:///optimization_studies.db"
-
-        study = optuna.create_study(
-            study_name=study_name,
-            storage=storage_name,
-            direction="maximize",
-            load_if_exists=True # Permite reluarea dacă crapă
-        )
-
-        print(f"--- Început pre-procesare o singură dată pentru {symbol} ---")
-        
-        h1_ema_period = config.get('strategies',{}).get('ema_rsi_scalper',{}).get('h1_ema_period', 50)
-        m5_atr_period = config.get('strategies',{}).get('ema_rsi_scalper',{}).get('m5_atr_period', 14)
-        m5_rsi_period = config.get('strategies',{}).get('ema_rsi_scalper',{}).get('m5_rsi_period', 14)
-
+        # 1. Pre-procesare (O singură dată per simbol)
         try:
-            processed_data = preprocess_data_ema(DATA_PATHS, symbol, h1_ema_period, m5_atr_period, m5_rsi_period)
-            print("--- Pre-procesare finalizată. Se pornește optimizarea... ---")
+            processed_data = preprocess_data_static(paths, symbol, base_config['strategies']['ema_rsi_scalper'])
+            print(f"✅ Date încărcate: {len(processed_data)} bare.")
         except FileNotFoundError:
-            print(f"EROARE: Datele pentru {symbol} ({DATA_SUFFIX}) nu au fost găsite. Se sare la următorul simbol.")
-            all_best_results.append({"symbol": symbol, "status": "EȘUAT (Date Lipsă)", "profit_factor": 0})
+            print(f"⚠️ Skip {symbol}: Fișierele de date lipsesc.")
             continue
         except Exception as e:
-            print(f"EROARE FATALĂ la pre-procesarea datelor pentru {symbol}: {e}")
-            traceback.print_exc()
-            all_best_results.append({"symbol": symbol, "status": f"EȘUAT ({e})", "profit_factor": 0})
+            print(f"❌ Skip {symbol}: Eroare la procesare ({e})")
             continue
 
-        completed_trials = len(study.trials)
-        trials_to_run = max(0, TOTAL_TRIALS_PER_SYMBOL - completed_trials)
+        # 2. Optuna Study
+        study_name = f"study_{symbol}_m5h1"
+        storage_url = f"sqlite:///opt_results.db" # Bază de date unică
         
-        print(f"Stocare: {storage_name} (Studiu: {study_name})")
-        print(f"Obiectiv: Maximizare Profit Factor, cu Drawdown Maxim <= {MAX_DRAWDOWN_LIMIT}%")
-        print(f"Teste finalizate anterior: {completed_trials}")
-        print(f"Teste rămase de rulat: {trials_to_run}")
+        study = optuna.create_study(
+            study_name=study_name,
+            storage=storage_url,
+            direction="maximize",
+            load_if_exists=True
+        )
+        
+        # Calculăm câte trial-uri mai avem de făcut
+        remaining_trials = max(0, TOTAL_TRIALS - len(study.trials))
+        
+        if remaining_trials > 0:
+            print(f"Running {remaining_trials} trials...")
+            # Lambda pentru a pasa argumentele statice
+            optimize_func = lambda t: objective(t, base_config, symbol, MAX_DRAWDOWN_LIMIT, processed_data)
+            study.optimize(optimize_func, n_trials=remaining_trials, show_progress_bar=True)
+        else:
+            print("Toate trial-urile au fost deja executate.")
 
-        if trials_to_run > 0:
-            objective_func = lambda trial: objective(trial, config, symbol, MAX_DRAWDOWN_LIMIT, processed_data)
-            study.optimize(objective_func, n_trials=trials_to_run, show_progress_bar=True)
-
-        print(f"--- Optimizare finalizată pentru {symbol} ---")
-
+        # 3. Rezultate
         try:
-            best_trial = study.best_trial
-            if best_trial.value < 0:
-                print(f"Rezultat {symbol}: Nicio combinație validă găsită (DD > {MAX_DRAWDOWN_LIMIT}%).")
-                all_best_results.append({"symbol": symbol, "status": "EȘUAT (DD Prea Mare)", "profit_factor": best_trial.value})
-            else:
-                print(f"Rezultat {symbol}: PF={best_trial.value:.4f}")
-                result_summary = {"symbol": symbol, "status": "Succes", "profit_factor": best_trial.value}
-                result_summary.update(best_trial.params) # Adaugă parametrii găsiți
-                all_best_results.append(result_summary)
+            best = study.best_trial
+            print(f"🏆 BEST {symbol}: PF={best.value:.2f} | Params: {best.params}")
+            
+            # Salvăm rezultatul
+            res = {"symbol": symbol, "profit_factor": best.value}
+            res.update(best.params)
+            all_best_results.append(res)
+            
         except ValueError:
-            print(f"Rezultat {symbol}: Niciun trial nu s-a completat cu succes.")
-            all_best_results.append({"symbol": symbol, "status": "EȘUAT (Niciun trial)", "profit_factor": 0})
-    
-    # --- RAPORTUL FINAL DE PORTOFOLIU ---
-    print("\n" + "="*80)
-    print("--- REZUMATUL OPTIMIZĂRII PORTOFOLIULUI (1 AN) ---")
-    print("="*80)
-    
-    # Formatăm și afișăm rezultatele
-    results_df = pd.DataFrame(all_best_results)
-    print(results_df.to_string(index=False, float_format="%.4f"))
-    
-    # Salvăm rezultatele într-un CSV
-    results_df.to_csv("portfolio_optimization_summary.csv", index=False)
-    print("\n" + "="*80)
-    print("Rezultatele complete au fost salvate în 'portfolio_optimization_summary.csv'")
-    print("="*80)
+            print(f"❌ Niciun rezultat valid găsit pentru {symbol}.")
+
+    # --- Raport Final ---
+    if all_best_results:
+        df_res = pd.DataFrame(all_best_results)
+        df_res.to_csv("optimization_summary_final.csv", index=False)
+        print("\n✅ Optimizare Finalizată! Rezultate salvate în 'optimization_summary_final.csv'.")
+        
+        # Curățenie fișier temporar
+        if os.path.exists("temp_opt_junk.txt"):
+            os.remove("temp_opt_junk.txt")

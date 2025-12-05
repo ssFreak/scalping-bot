@@ -1,3 +1,5 @@
+# managers/bot_manager.py - IMPLEMENTARE COMPLETĂ (Apel Trailing/Profit Lock)
+
 import threading
 import time
 import signal
@@ -11,10 +13,9 @@ from managers.risk_manager import RiskManager
 from core.logger import Logger
 from core.broker_context import LiveBrokerContext
 
-# Importăm DOAR strategiile de care avem nevoie
+from strategies.bb_scalper import BollingerReversionScalper
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
 from strategies.base_strategy import BaseStrategy 
-# (Asigură-te că fișierul base_strategy.py este cel corect)
 
 class BotManager:
     def __init__(self, config_path="config/config.yaml"):
@@ -34,8 +35,10 @@ class BotManager:
             self.logger.log("❌ Nu s-a putut inițializa conexiunea MT5.", "error"); sys.exit(1)
         
         deviation = self.config.get("general", {}).get("deviation", 5)
-        self.trade_manager = TradeManager(self.logger, deviation, self.mt5)
-        self.risk_manager = RiskManager(self.config, self.logger, self.trade_manager, self.mt5)
+        # Atenție: RiskManager și TradeManager se inițializează reciproc
+        self.risk_manager = RiskManager(self.config, self.logger, None, self.mt5)
+        self.trade_manager = TradeManager(self.logger, deviation, self.mt5, risk_manager=self.risk_manager) 
+        self.risk_manager.trade_manager = self.trade_manager # Conexiune circulară finalizată
         
         self.live_broker_context = LiveBrokerContext(
             self.logger, self.risk_manager, self.trade_manager, self.mt5
@@ -46,15 +49,13 @@ class BotManager:
         self.stop_event = threading.Event()
 
     def _load_strategies(self):
-        """
-        Încarcă strategiile pe baza noii structuri din config.yaml.
-        """
+        """Încarcă strategiile (Logică neschimbată)."""
         instances = []
         strategy_configs = self.config.get("strategies", {})
 
         strategy_map = {
-            "ema_rsi_scalper": EMARsiTrendScalper
-            # Adaugă aici alte strategii (ex: "pinbar": PinBarStrategy)
+            "ema_rsi_scalper": EMARsiTrendScalper,
+            "bb_range_scalper": BollingerReversionScalper
         }
 
         for strategy_name, base_config in strategy_configs.items():
@@ -110,26 +111,36 @@ class BotManager:
         self.logger.log("✅ Bot oprit complet.")
 
     def _monitor(self):
-        """
-        Thread separat pentru verificări globale (drawdown, weekend) 
-        ȘI pentru logarea centralizată a stării.
-        """
+        """Thread separat pentru verificări globale și Sync."""
         while not self.stop_event.is_set():
             
-            # Logăm starea 'can_trade' centralizat (ex: o dată pe oră)
+            # 1. Verifică permisiunile de trading
             self.risk_manager.can_trade(verbose=True)
             
+            # 2. Sincronizează tracker-ul intern cu realitatea (CRITIC pentru shadow accounting)
+            # Asta rezolvă problema când pozițiile sunt închise de TP/SL pe server
+            self.trade_manager.sync_internal_tracker()
+            
+            # 3. Trailing & Profit Lock
+            open_positions = self.mt5.positions_get()
+            if open_positions:
+                for pos in open_positions:
+                    self.trade_manager.apply_trailing(pos)
+            
+            # 4. Verificări de risc major
             if self.risk_manager.check_drawdown_breach():
-                self.logger.log("‼️ LIMITĂ DRAWDOWN ATINSĂ! Se inițiază oprirea de urgență!", "error")
+                self.logger.log("‼️ LIMITĂ DRAWDOWN ATINSĂ! Oprire de urgență!", "error")
                 self.trade_manager.close_all_trades()
-                self.stop(); break
+                self.stop()
+                break
             
             if self.risk_manager.check_for_rollover_closure():
-                self.logger.log("🛑 WEEKEND! Se închid toate pozițiile și se oprește botul.")
+                self.logger.log("🛑 WEEKEND! Se închid pozițiile și se oprește botul.")
                 self.trade_manager.close_all_trades()
-                self.stop(); break
+                self.stop()
+                break
 
-            if self.stop_event.wait(timeout=60):
+            if self.stop_event.wait(timeout=5): # Verificare la 5 secunde e suficient
                 break
 
     def stop(self, *args):
@@ -141,7 +152,11 @@ class BotManager:
         self.stop_event.set()
 
 if __name__ == "__main__":
-    bot = BotManager("config/config.yaml") 
-    signal.signal(signal.SIGINT, bot.stop)
-    signal.signal(signal.SIGTERM, bot.stop)
-    bot.start()
+    try:
+        bot = BotManager("config/config.yaml") 
+        signal.signal(signal.SIGINT, bot.stop)
+        signal.signal(signal.SIGTERM, bot.stop)
+        bot.start()
+    except Exception as e:
+        print(f"Eroare fatală la inițializarea BotManager: {e}")
+        sys.exit(1)

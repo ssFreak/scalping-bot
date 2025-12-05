@@ -7,7 +7,7 @@ class BaseStrategy:
         self.config = config
         self.broker = broker_context
         self.logger = self.broker.logger
-        self.magic_number = int(self.config.get("magic_number", 0))
+        self.magic_number = int(self.config.get("magic_number_offset", 0))
         self.stop_event = threading.Event()
 
         if self.magic_number == 0:

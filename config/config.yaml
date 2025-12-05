@@ -1,137 +1,65 @@
+# config/config.yaml - ULTIMATE COMBINED PORTFOLIO
+# Strategie A: EMA Trend (Sniper) | Strategie B: BB Spike (Hunter)
+
 general:
-  # Lista simbolurilor pe care le-am optimizat
-  symbols_forex:
-  - EURUSD
-  - GBPUSD
-  - USDCAD
-  - USDCHF
-  - USDJPY
-  - AUDUSD
-  - NZDUSD
-  - AUDJPY
-  - EURJPY
-  - EURGBP
-  - GBPJPY
-  
-  # Setările generale ale contului
-  daily_profit: 999999      # Dezactivat (conform discuției)
-  daily_loss: -999999      # Dezactivat
-  risk_per_trade: 0.005     # 0.5% Risc per tranzacție
-  max_position_lot: 0.3     # Frâna de siguranță
-  min_free_margin_ratio: 0.6 # Protecție anti-Margin Call
+  account_name: "Live_Ultimate_Bot"
+  login: 
+  password: 
+  server: 
+  daily_profit: 500.0
+  daily_loss: -200.0
+  max_drawdown: 0.30
+  risk_per_trade: 0.02
+  max_position_lot: 1.0
+  min_free_margin_ratio: 0.6
+  session_hours: []
   deviation: 10
-  session_hours: []         # GOL = Rulează 24/5
-  max_drawdown: 0.2         # Oprire de urgență la 20% DD total
-  
-  # Setarea perioadei de logare pentru can_trade (în secunde)
-  can_trade_log_period_sec: 3600 # O dată pe oră
+  can_trade_log_period_sec: 3600
 
 trailing:
-  # Setările optimizate pentru Break-Even (din trial-urile tale)
   enabled: true
-  be_min_profit_pips: 15.0 # (Exemplu) Înlocuiește cu valoarea optimă găsită
-  be_secured_pips: 5.0     # (Exemplu) Înlocuiește cu valoarea optimă găsită
-  
+  be_min_profit_points: 80.0 
+  be_secured_points: 30.0   
+  profit_lock_percent: 0.85 
+
 strategies:
-
-  # --- Strategia Câștigătoare (Singura Activă) ---
+  
+  # --- A. TREND SCALPER (M5/H1) ---
   ema_rsi_scalper:
-    enabled: true   
-    magic_number_base: 19133000 # Folosind numărul tău
-    
-    # Parametrii ficși (comuni) stabiliți în urma testării
-    timeframe: 'M5'
-    h1_ema_period: 50
-    m5_atr_period: 14
-    m5_rsi_period: 14
+    enabled: true
+    magic_number_base: 19133000
+    timeframe: "M5"
+    timeframe_trend: "H1"
+    ema_period: 50
+    atr_period: 14
+    rsi_period: 14
+    ema_distance_pips: 8.0 
 
-    # --- PARAMETRI SPECIFICI PER SIMBOL (din imaginea ta) ---
     symbol_settings:
-      
-      EURUSD:
-        enabled: true 
-        magic_number_offset: 1 # 19133001
-        rr_target: 1.0658
-        sl_atr_multiplier: 2.5451
-        rsi_oversold: 15
-        rsi_overbought: 85
+      GBPJPY: {enabled: true, magic_number_offset: 11, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 10.0, profit_lock_percent: 0.9}
+      USDJPY: {enabled: true, magic_number_offset: 5, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 25, rsi_overbought: 80, ema_distance_pips: 11.0, profit_lock_percent: 0.85}
+      GBPUSD: {enabled: true, magic_number_offset: 2, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 6.0, profit_lock_percent: 0.8}
+      EURJPY: {enabled: true, magic_number_offset: 9, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 75, ema_distance_pips: 9.0, profit_lock_percent: 0.75}
+      AUDJPY: {enabled: true, magic_number_offset: 8, rr_target: 1.1, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 9.0, profit_lock_percent: 0.9}
+      EURUSD: {enabled: true, magic_number_offset: 1, rr_target: 1.1, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 8.0, profit_lock_percent: 0.9}
 
-      GBPUSD:
-        enabled: true 
-        magic_number_offset: 2 # 19133002
-        rr_target: 3.0310
-        sl_atr_multiplier: 2.1821
-        rsi_oversold: 21
-        rsi_overbought: 85
-
-      USDCAD:
-        enabled: true 
-        magic_number_offset: 3 # 19133003
-        rr_target: 3.7336
-        sl_atr_multiplier: 1.2396
-        rsi_oversold: 15
-        rsi_overbought: 84
-          
-      USDCHF:
-        enabled: true 
-        magic_number_offset: 4 # 19133004
-        rr_target: 3.0291
-        sl_atr_multiplier: 1.7703
-        rsi_oversold: 19
-        rsi_overbought: 85
-        
-      USDJPY:
-        enabled: true 
-        magic_number_offset: 5 # 19133005
-        rr_target: 1.8192
-        sl_atr_multiplier: 1.4470
-        rsi_oversold: 16
-        rsi_overbought: 85
-
-      AUDUSD:
-        enabled: true 
-        magic_number_offset: 6 # 19133006
-        rr_target: 3.8661
-        sl_atr_multiplier: 1.1429
-        rsi_oversold: 17
-        rsi_overbought: 84
-
-      NZDUSD:
-        enabled: true 
-        magic_number_offset: 7 # 19133007
-        rr_target: 1.7085
-        sl_atr_multiplier: 1.1349
-        rsi_oversold: 17
-        rsi_overbought: 85
-
-      AUDJPY:
-        enabled: true 
-        magic_number_offset: 8 # 19133008
-        rr_target: 2.5176
-        sl_atr_multiplier: 1.4785
-        rsi_oversold: 15
-        rsi_overbought: 84
-        
-      EURJPY:
-        enabled: true
-        magic_number_offset: 9 # 19133009
-        rr_target: 1.0754
-        sl_atr_multiplier: 1.4956
-        rsi_oversold: 16
-        rsi_overbought: 85
-        
-      EURGBP:
-        enabled: true
-        magic_number_offset: 10 # 19133010
-        rr_target: 3.9066
-        sl_atr_multiplier: 1.1422
-        rsi_oversold: 16
-        rsi_overbought: 85
-        
-      GBPJPY:
-        enabled: true
-        magic_number_offset: 11 # 19133011
-        rr_target: 1.2151
-        sl_atr_multiplier: 2.5956
-        rsi_oversold: 16
-        rsi_overbought: 84
+  # --- B. SPIKE HUNTER (M5) ---
+  bb_range_scalper:
+    enabled: true
+    magic_number_base: 20000000
+    timeframe: "M5"
+    bb_period: 15
+    bb_dev: 3.4
+    adx_period: 14
+    adx_max: 30.0
+    
+    symbol_settings:
+      # Elita optimizată pentru Spike-uri
+      AUDNZD: {enabled: true, magic_number_offset: 13, bb_period: 15, bb_dev: 3.2, adx_max: 40.0}
+      AUDUSD: {enabled: true, magic_number_offset: 6, bb_period: 15, bb_dev: 3.5, adx_max: 40.0}
+      GBPJPY: {enabled: true, magic_number_offset: 11, bb_period: 15, bb_dev: 3.4, adx_max: 20.0}
+      EURJPY: {enabled: true, magic_number_offset: 9, bb_period: 15, bb_dev: 3.5, adx_max: 40.0}
+      AUDJPY: {enabled: true, magic_number_offset: 8, bb_period: 15, bb_dev: 3.4, adx_max: 25.0}
+      GBPUSD: {enabled: true, magic_number_offset: 2, bb_period: 15, bb_dev: 3.4, adx_max: 30.0}
+      USDJPY: {enabled: true, magic_number_offset: 5, bb_period: 15, bb_dev: 3.4, adx_max: 30.0}
+      EURCHF: {enabled: true, magic_number_offset: 12, bb_period: 15, bb_dev: 3.5, adx_max: 25.0}

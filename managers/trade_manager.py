@@ -1,257 +1,270 @@
-# managers/trade_manager.py
+# managers/trade_manager.py - IMPLEMENTARE CU SYNC CORECT ȘI HARD SL UPDATE
+
 import traceback
-from datetime import datetime
 import numpy as np
+# Nu mai importam MT5 direct aici, folosim connector-ul transmis
 
 class TradeManager:
     def __init__(self, logger, trade_deviation, mt5, risk_manager=None):
         self.logger = logger
         self.trade_deviation = trade_deviation
-        self.mt5 = mt5
+        self.mt5 = mt5 # Acesta este wrapper-ul thread-safe
         self.risk_manager = risk_manager
+        
+        self.profit_lock_hwm = {} 
+        self.internal_active_symbols = set()
 
     def _ensure_symbol(self, symbol: str) -> bool:
         info = self.mt5.get_symbol_info(symbol)
         if info is None:
-            self.logger.log(f"❌ Simbolul {symbol} nu a fost găsit în Market Watch")
+            self.logger.log(f"❌ Simbolul {symbol} nu a fost găsit.")
             return False
         if not info.visible:
             if not self.mt5.symbol_select(symbol, True):
-                self.logger.log(f"❌ Nu am putut selecta simbolul {symbol} în Market Watch")
+                self.logger.log(f"❌ Nu am putut selecta simbolul {symbol}.")
                 return False
         return True
-        
+
+    def sync_internal_tracker(self):
+        """
+        Sincronizează trackerul intern cu realitatea din MT5.
+        Elimină simbolurile care nu mai au poziții active.
+        """
+        try:
+            positions = self.mt5.positions_get()
+            real_symbols = set()
+            if positions:
+                for pos in positions:
+                    real_symbols.add(pos.symbol)
+            
+            # Resetăm complet setul intern pe baza realității
+            self.internal_active_symbols = real_symbols
+            
+        except Exception as e:
+            self.logger.log(f"Eroare la sync_internal_tracker: {e}", "error")
+
     def _update_sl(self, symbol, ticket, new_sl, magic_number):
+        """Trimite o cerere MT5 pentru a modifica doar SL-ul."""
         if not self._ensure_symbol(symbol): return False
-        position = None
-        positions = self.mt5.positions_get(symbol=symbol)
-        if not positions: return False
-        for p in positions:
-            if p.ticket == ticket:
-                position = p
-                break
-        if not position: return False
         
-        digits = self.mt5.get_digits(symbol)
+        positions = self.mt5.positions_get(ticket=ticket)
+        if not positions: return False
+        position = positions[0]
+        
+        # Anti-Spam: Dacă SL e deja aproape identic, nu facem request
+        if abs(position.sl - new_sl) < 1e-5:
+            return True 
+
+        symbol_info = self.mt5.get_symbol_info(symbol)
+        if not symbol_info: return False
+        
+        # Verificare StopLevel (distanța minimă față de preț)
+        stop_level = symbol_info.trade_stops_level * symbol_info.point
+        tick = self.mt5.get_symbol_info_tick(symbol)
+        if not tick: return False
+        
+        current_price = tick.bid if position.type == self.mt5.ORDER_TYPE_BUY else tick.ask
+        
+        # Ajustare dacă noul SL e prea aproape de preț
+        if abs(current_price - new_sl) < stop_level:
+            if position.type == self.mt5.ORDER_TYPE_BUY:
+                new_sl = current_price - stop_level - symbol_info.point
+            else:
+                new_sl = current_price + stop_level + symbol_info.point
 
         request = {
             "action": self.mt5.TRADE_ACTION_SLTP,
             "symbol": symbol,
             "position": ticket,
-            "sl": float(np.round(new_sl, digits)), # JPY-safe
-            "tp": position.tp,
-            "magic": magic_number,
-            "comment": "Update SL",
-        }
-        result = self.mt5.order_send(request)
-        
-        if result is None:
-            self.logger.log(f"❌ Eșec actualizare SL pentru {symbol}: order_send a returnat None", "error")
-            return False
-        if result.retcode == self.mt5.TRADE_RETCODE_DONE:
-            self.logger.log(f"✅ SL actualizat pentru {symbol}, ticket={ticket}, new SL={new_sl}")
-            return True
-        else:
-            self.logger.log(f"❌ Eșec actualizare SL pentru {symbol}: retcode={result.retcode}, comment={getattr(result,'comment','')}", "error")
-            return False
-
-    def safe_order_send(self, request, context=""):
-        symbol = request.get("symbol")
-        if not self._ensure_symbol(symbol):
-            return None
-        try:
-            result = self.mt5.order_send(request)
-            if result is None:
-                err = self.mt5.last_error()
-                self.logger.log(f"❌ order_send a returnat None ({context}) pentru {symbol}, last_error={err}", "error")
-                return None
-            if result.retcode != self.mt5.TRADE_RETCODE_DONE:
-                self.logger.log(f"❌ order_send a eșuat ({context}) {symbol}: retcode={result.retcode}, comment={getattr(result, 'comment', '')}", "error")
-                return result
-            self.logger.log(f"✅ OrderSend OK ({context}) {symbol}: order={getattr(result,'order',0)}")
-            return result
-        except Exception as e:
-            self.logger.log(f"❌ Excepție în safe_order_send ({context}) {symbol}: {e}", "error")
-            return None
-
-    def close_all_trades(self, magic_number=0):
-        all_positions = self.mt5.positions_get() or []
-        all_orders = self.mt5.orders_get() or []
-        if magic_number > 0:
-            positions = [p for p in all_positions if p.magic == magic_number]
-            orders = [o for o in all_orders if o.magic == magic_number]
-            context_log = f"(magic={magic_number})"
-        else:
-            positions = all_positions; orders = all_orders; context_log = "(toate strategiile)"
-        
-        if not positions and not orders:
-             self.logger.log(f"ℹ️ Nu există poziții sau ordine de gestionat {context_log}.")
-             return True
-
-        self.logger.log(f"🛑 Inițiază închiderea a {len(positions)} poziții și anularea a {len(orders)} ordine pending {context_log}...")
-        for pos in positions:
-            try:
-                self.close_trade(pos.symbol, pos.ticket, pos.magic)
-            except Exception as e:
-                self.logger.log(f"❌ Eroare la procesarea închiderii poziției {pos.ticket}: {e}", "error")
-        for order in orders:
-            try:
-                if not self._ensure_symbol(order.symbol): continue
-                request_remove = {"action": self.mt5.TRADE_ACTION_REMOVE, "order": order.ticket, "symbol": order.symbol, "magic": order.magic}
-                self.mt5.order_send(request_remove)
-            except Exception as e:
-                self.logger.log(f"❌ Eroare la procesarea anulării ordinului {order.ticket}: {e}", "error")
-        return True
-
-
-    def open_trade(self, symbol, order_type, lot, sl, tp, deviation_points, magic_number, comment="", ml_features=None):
-        if not self._ensure_symbol(symbol): return None
-        tick = self.mt5.get_symbol_info_tick(symbol)
-        if tick is None:
-            self.logger.log(f"❌ Nu am putut obține tick data pentru {symbol}")
-            return None
-
-        price = tick.ask if order_type == self.mt5.ORDER_TYPE_BUY else tick.bid
-        
-        # Corecția pentru Eroarea 10030
-        filling_type = self.mt5.ORDER_FILLING_IOC 
-        
-        digits = self.mt5.get_digits(symbol) 
-
-        request = {
-            "action": self.mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": float(lot),
-            "type": order_type,
-            "price": float(price),
-            "sl": float(np.round(sl, digits)), # Corecție JPY-safe
-            "tp": float(np.round(tp, digits)), # Corecție JPY-safe
+            "sl": float(np.round(new_sl, self.mt5.get_digits(symbol))),
+            "tp": float(position.tp), 
             "deviation": self.trade_deviation,
             "magic": magic_number,
-            "comment": comment,
-            "type_filling": filling_type,
         }
+        
+        result = self.mt5.order_send(request)
+        if result and (result.retcode == self.mt5.TRADE_RETCODE_DONE or result.retcode == self.mt5.TRADE_RETCODE_NO_CHANGES):
+            return True
+        return False
 
-        result = self.safe_order_send(request, f"open {symbol}")
+    def open_trade(self, symbol, order_type, lot, sl, tp, deviation_points, magic_number, comment, ml_features=None):
+        # 🟢 SAFETY: Verificăm tracker-ul intern
+        if symbol in self.internal_active_symbols:
+            # Opțional: Poți comenta log-ul de mai jos dacă e prea zgomotos
+            # self.logger.log(f"Skip {symbol}: Poziție deja activă intern.") 
+            return None
 
-        if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
-            ticket = getattr(result, "order", 0)
-            order_type_str = "BUY" if order_type == self.mt5.ORDER_TYPE_BUY else "SELL"
-            
-            # Trimitem datele ML către logger
-            self.logger.log_position(
-                ticket=ticket, symbol=symbol, order_type=order_type_str, 
-                lot_size=lot, entry_price=price, sl=sl, tp=tp, 
-                comment=comment, closed=False, ml_features=ml_features
-            )
-
-        return result
-
-    def close_trade(self, symbol, ticket, magic_number):
         if not self._ensure_symbol(symbol): return None
-        positions = self.mt5.positions_get(symbol=symbol)
-        if not positions: return None
-        pos = next((p for p in positions if p.ticket == ticket), None)
-        if pos is None: return None
         tick = self.mt5.get_symbol_info_tick(symbol)
         if tick is None: return None
 
-        price = tick.bid if pos.type == self.mt5.ORDER_TYPE_BUY else tick.ask
-        order_type = (self.mt5.ORDER_TYPE_SELL if pos.type == self.mt5.ORDER_TYPE_BUY else self.mt5.ORDER_TYPE_BUY)
+        price = tick.ask if order_type == 0 else tick.bid
+        digits = self.mt5.get_digits(symbol)
+        
+        trade_type = self.mt5.ORDER_TYPE_BUY if order_type == 0 else self.mt5.ORDER_TYPE_SELL
 
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": float(pos.volume),
-            "type": order_type,
-            "position": ticket,
+            "volume": lot,
+            "type": trade_type,
             "price": float(price),
-            "deviation": self.trade_deviation,
+            "deviation": deviation_points,
+            "sl": float(np.round(sl, digits)),
+            "tp": float(np.round(tp, digits)),
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            "type_filling": self.mt5.ORDER_FILLING_FOK,
             "magic": magic_number,
-            "comment": "Close trade",
-            "type_filling": self.mt5.ORDER_FILLING_IOC, # Corecție Filling Mode
+            "comment": comment,
         }
-        result = self.safe_order_send(request, f"close {symbol}")
+
+        result = self.mt5.order_send(request)
         
         if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
-            # La închidere, actualizăm rândul existent
+            ticket = result.order
+            self.internal_active_symbols.add(symbol) # 🔒 Blocăm simbolul imediat
+            
             self.logger.log_position(
-                ticket=ticket, symbol=symbol, order_type="CLOSE", 
-                lot_size=pos.volume, entry_price=price, sl=pos.sl, tp=pos.tp, 
-                comment=f"Closed ticket {ticket}", closed=True, exit_price=price
+                ticket=ticket, symbol=symbol, order_type="BUY" if order_type == 0 else "SELL",
+                lot_size=lot, entry_price=price, sl=sl, tp=tp, 
+                comment=comment, closed=False, ml_features=ml_features 
             )
+            return ticket
+        return None
+        
+    def close_trade(self, symbol: str, ticket: int, magic_number: int):
+        positions = self.mt5.positions_get(ticket=ticket)
+        if not positions:
+            # Dacă nu o găsim, forțăm curățarea trackerului
+            if symbol in self.internal_active_symbols:
+                self.internal_active_symbols.remove(symbol)
+            return False
+            
+        position = positions[0]
+        tick = self.mt5.get_symbol_info_tick(symbol)
+        close_price = tick.bid if position.type == self.mt5.ORDER_TYPE_BUY else tick.ask
+        close_type = self.mt5.ORDER_TYPE_SELL if position.type == self.mt5.ORDER_TYPE_BUY else self.mt5.ORDER_TYPE_BUY 
+        
+        request = {
+            "action": self.mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": position.volume,
+            "type": close_type,
+            "position": ticket,
+            "price": close_price,
+            "deviation": self.trade_deviation,
+            "magic": magic_number,
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            "type_filling": self.mt5.ORDER_FILLING_FOK,
+        }
 
-        return result
+        result = self.mt5.order_send(request)
+        
+        if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
+            self.logger.log_position(
+                ticket=ticket, symbol=symbol, order_type="CLOSE", lot_size=position.volume,
+                exit_price=close_price, closed=True
+            )
+            # Sincronizarea se va face automat și în monitor, dar ajută să o facem și aici
+            if symbol in self.internal_active_symbols:
+                self.internal_active_symbols.remove(symbol)
+            return True
+        return False
 
-    def apply_trailing(self, symbol, position, atr_price: float, pip: float, params: dict):
+    def close_all_trades(self):
+        positions = self.mt5.positions_get()
+        if not positions:
+             self.internal_active_symbols.clear()
+             return
+        
+        for pos in positions:
+            self.close_trade(pos.symbol, pos.ticket, pos.magic)
+        self.internal_active_symbols.clear()
+
+    def apply_trailing(self, position):
         """
-        Aplică logica de trailing stop / break-even.
+        Aplică logica de Break-Even și Profit Lock.
+        FIX: Anti-spam logging și rotunjire corectă.
         """
         try:
-            ticket = position.ticket
-            entry_price = position.price_open
-            sl = position.sl
-            order_type = position.type  # 0=buy, 1=sell
-            magic_number = position.magic # Preluăm magic_number-ul poziției
-            
-            info = self.mt5.get_symbol_info(symbol)
-            tick = self.mt5.get_symbol_info_tick(symbol)
-            if info is None or tick is None: return
-            
-            point = info.point
-            digits = info.digits
-            current_price = tick.bid if order_type == 0 else tick.ask
-            
-            profit_pips = (current_price - entry_price) / point if order_type == 0 else (entry_price - current_price) / point
-            
-            # Verificăm dacă logul de trailing este activat în configul general
-            if self.config.get("general", {}).get("log_trailing", False):
-                 self.logger.log(f"🔍 Trailing check {symbol} ticket={ticket} profit={profit_pips:.1f} pips (SL={sl}, TP={position.tp})")
-            
-            be_min_profit = params.get("be_min_profit_pips", 20)
-            be_secured_pips = params.get("be_secured_pips", 5.0) 
-            
-            profit_lock_threshold = params.get("profit_lock_threshold_pips", 50.0)
-            profit_lock_guarantee = params.get("profit_lock_guarantee_pips", 15.0)
+            params = self.risk_manager.get_trailing_params()
+            if not params.get("enabled", False): return
 
-            new_sl = None
+            symbol = position.symbol
+            ticket = position.ticket
+            entry = position.price_open
+            sl = position.sl
+            tp = position.tp
+            type_op = position.type
             
-            if profit_pips > 0:
-                sl_target_pips = None
+            # Info simbol
+            tick = self.mt5.get_symbol_info_tick(symbol)
+            if not tick: return
+            
+            curr_price = tick.bid if type_op == self.mt5.ORDER_TYPE_BUY else tick.ask
+            
+            sym_info = self.mt5.get_symbol_info(symbol)
+            if not sym_info: return
+            
+            point = sym_info.point
+            digits = sym_info.digits
+            
+            # --- 1. Break Even Simplu (bazat pe puncte) ---
+            be_points = float(params.get("be_min_profit_points", 0))
+            be_secure = float(params.get("be_secured_points", 0))
+            
+            if be_points > 0:
+                profit_pts = (curr_price - entry) / point if type_op == 0 else (entry - curr_price) / point
                 
-                # 1. Verificăm Profit Lock Absolut
-                if profit_pips >= profit_lock_threshold:
-                    sl_target_pips = profit_lock_guarantee
-                # 2. Verificăm Break-Even
-                elif profit_pips >= be_min_profit:
-                    sl_target_pips = be_secured_pips
-                
-                if sl_target_pips is not None:
-                    sl_lock_price = entry_price + sl_target_pips * point if order_type == 0 else entry_price - sl_target_pips * point
+                if profit_pts >= be_points:
+                    new_sl_be = entry + (be_secure * point) if type_op == 0 else entry - (be_secure * point)
+                    new_sl_be = round(new_sl_be, digits) # Rotunjire
                     
-                    if (order_type == 0 and (sl is None or sl < sl_lock_price)) or \
-                       (order_type == 1 and (sl is None or sl > sl_lock_price)):
+                    # Verificăm diferența semnificativă (> 0.5 puncte) pentru a evita spam-ul
+                    if (type_op == 0 and new_sl_be > (sl + point * 0.5)) or \
+                       (type_op == 1 and (sl == 0 or new_sl_be < (sl - point * 0.5))):
                         
-                        new_sl = round(sl_lock_price, digits)
-                        self.logger.log(f"➡️ [{symbol}] Mutare SL la profit garantat: {sl_target_pips:.1f} pips.")
-                        self._update_sl(symbol, ticket, new_sl, magic_number) 
-                        return
+                        self.logger.log(f"➡️ [{symbol}] BE Trigger ({profit_pts:.0f} pts). Mutare SL la {new_sl_be}")
+                        if self._update_sl(symbol, ticket, new_sl_be, position.magic):
+                            sl = new_sl_be # Actualizăm local pentru pasul următor
+
+            # --- 2. Profit Lock (Hard SL) ---
+            profit_lock_pct = float(params.get("profit_lock_percent", 0.0))
+            
+            if profit_lock_pct > 0.0 and tp > 0:
+                total_dist = abs(tp - entry)
+                curr_dist = abs(curr_price - entry)
                 
-                # 3. Logica de Trailing dinamic (dacă e activată și SL e deja pe profit)
-                is_sl_in_profit = (order_type == 0 and sl is not None and sl > entry_price) or \
-                                  (order_type == 1 and sl is not None and sl < entry_price)
+                if total_dist == 0: return
+
+                pct_reached = curr_dist / total_dist
                 
-                trailing_step_pips = params.get("step_pips", 0)
-                
-                if is_sl_in_profit and trailing_step_pips > 0:
-                    trailing_distance = trailing_step_pips * point
-                    sl_new_price = current_price - trailing_distance if order_type == 0 else current_price + trailing_distance
+                if pct_reached >= profit_lock_pct:
+                    # Calcul țintă
+                    lock_dist = total_dist * (profit_lock_pct - 0.02) # Mic buffer
                     
-                    if (order_type == 0 and sl_new_price > sl) or (order_type == 1 and sl_new_price < sl):
-                        new_sl = round(sl_new_price, digits)
-                        self.logger.log(f"⚡ [{symbol}] Step Trailing: SL mutat la {new_sl:.{digits}f}")
-                        self._update_sl(symbol, ticket, new_sl, magic_number) 
-                        return
-                
+                    if type_op == 0: # BUY
+                        target_sl = entry + lock_dist
+                    else: # SELL
+                        target_sl = entry - lock_dist
+                    
+                    # Rotunjire obligatorie
+                    target_sl = round(target_sl, digits)
+                    
+                    # 🛑 FIX SPAM: Logăm și executăm DOAR dacă diferența e relevantă
+                    # Verificăm dacă noul SL este mai bun decât cel curent cu cel puțin 1 'point'
+                    
+                    should_update = False
+                    if type_op == 0: # Buy - SL trebuie să urce
+                        if target_sl > (sl + point * 0.5):
+                            should_update = True
+                    else: # Sell - SL trebuie să scadă
+                        if sl == 0.0 or target_sl < (sl - point * 0.5):
+                            should_update = True
+                            
+                    if should_update:
+                        self.logger.log(f"🔒 Profit Lock {symbol}: Securing at {target_sl}")
+                        self._update_sl(symbol, ticket, target_sl, position.magic)
+
         except Exception as e:
-            self.logger.log(f"❌ apply_trailing error for {symbol} ticket={ticket}: {e}", "error")
+            self.logger.log(f"Err trailing {ticket}: {e}", "error")

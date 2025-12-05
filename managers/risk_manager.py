@@ -1,10 +1,17 @@
-# managers/risk_manager.py
+# managers/risk_manager.py - IMPLEMENTARE CU PERSISTENȚĂ PEAK EQUITY
+
 import datetime
 import pytz
 import time
 import numpy as np
+import json
+import os # NOU: Necesităm OS pentru gestionarea fișierelor
 
 class RiskManager:
+    
+    # NOU: Definește calea fișierului de persistență
+    PEAK_EQUITY_FILE = "bot.log/peak_equity.json"
+
     def __init__(self, config, logger, trade_manager, mt5):
         self.config = config
         self.logger = logger
@@ -12,14 +19,14 @@ class RiskManager:
         self.mt5 = mt5
 
         # Parametri din config
-        self.max_daily_loss = config.get("daily_loss", -100)
-        self.risk_per_trade = config.get("risk_per_trade", 0.01)
-        self.max_daily_profit = config.get("daily_profit", 500)
-        self.min_free_margin_ratio = config.get("min_free_margin_ratio", 0.6)
-        self.max_drawdown = config.get("max_drawdown", 0.2)
+        general_cfg = config.get("general", {})
+        self.max_daily_loss = general_cfg.get("daily_loss", -100)
+        self.risk_per_trade = general_cfg.get("risk_per_trade", 0.01)
+        self.max_daily_profit = general_cfg.get("daily_profit", 500)
+        self.min_free_margin_ratio = general_cfg.get("min_free_margin_ratio", 0.6)
+        self.max_drawdown = general_cfg.get("max_drawdown", 0.2)
         self.friday_close_hour_utc = int(config.get("friday_close_hour_utc", 19))
         
-        general_cfg = config.get("general", {})
         self.sessions = general_cfg.get("session_hours", [])
         self.atr_thresholds = general_cfg.get("atr_thresholds_pips", {})
         self.trailing_params = config.get("trailing", {})
@@ -27,16 +34,45 @@ class RiskManager:
         self.exposure_limits = config.get("exposure_limits", {})
 
         # Logare (setat la 1h by default)
-        self.can_trade_log_period_sec = int(config.get("can_trade_log_period_sec", 3600))
+        self.can_trade_log_period_sec = int(general_cfg.get("can_trade_log_period_sec", 3600))
         self._last_can_trade_log_ts = 0.0
 
         # Urmărire zilnică
         self.daily_loss = 0.0
         self.last_reset_date = datetime.date.today()
+        
+        # ‼️ NOU: Încarcă Peak Equity la inițializare ‼️
         self.initial_equity = None
+        self.peak_equity = self._load_peak_equity()     
         self.trading_blocked_until_next_day = False
         self.rollover_closure_executed = False
 
+    # --- METODE NOI PENTRU PERSISTENȚĂ ---
+    def _load_peak_equity(self) -> float:
+        """
+        Încarcă Peak Equity-ul de pe disc, dacă există.
+        """
+        if os.path.exists(self.PEAK_EQUITY_FILE):
+            try:
+                with open(self.PEAK_EQUITY_FILE, 'r') as f:
+                    data = json.load(f)
+                    peak = float(data.get("peak_equity", 0.0))
+                    self.logger.log(f"💾 Peak Equity încărcat de pe disc: ${peak:.2f}")
+                    return peak
+            except Exception as e:
+                self.logger.log(f"❌ Eroare la citirea Peak Equity din fișier: {e}", "error")
+        return 0.0
+
+    def _save_peak_equity(self):
+        """
+        Salvează Peak Equity-ul pe disc.
+        """
+        try:
+            with open(self.PEAK_EQUITY_FILE, 'w') as f:
+                json.dump({"peak_equity": self.peak_equity}, f)
+        except Exception as e:
+            self.logger.log(f"❌ Eroare la salvarea Peak Equity în fișier: {e}", "error")
+            
     def get_today_total_profit(self) -> float:
         """Calculează PnL-ul de astăzi pe baza istoricului."""
         try:
@@ -111,6 +147,22 @@ class RiskManager:
         free_margin = float(info.margin_free)
         pnl_today = self.get_today_total_profit()
 
+        # ‼️ FIX 1: Inițializarea initial_equity aici (previne eroarea NoneType) ‼️
+        if self.initial_equity is None:
+            self.initial_equity = equity 
+        
+        # ‼️ FIX 2: Actualizează și Salvează Peak Equity ‼️
+        if self.peak_equity == 0.0:
+             # Setăm Peak Equity la prima citire non-zero sau dacă este mai mare decât capitalul inițial
+             if equity > 0.0 and equity >= self.initial_equity: 
+                 self.peak_equity = equity
+                 self._save_peak_equity()
+        elif equity > self.peak_equity:
+            self.peak_equity = equity
+            self._save_peak_equity() # Salvează la fiecare nou Peak!
+            if verbose:
+                self.logger.log(f"📈 NOU PEAK EQUITY înregistrat: ${self.peak_equity:.2f}", "info")
+                
         # Dezactivăm limitele dacă sunt setate la valori nerealiste (ex: 999999)
         cond_loss = pnl_today >= self.max_daily_loss if self.max_daily_loss > -9999 else True
         cond_profit = pnl_today <= self.max_daily_profit if self.max_daily_profit < 9999 else True
@@ -118,8 +170,7 @@ class RiskManager:
         cond_margin = (equity == 0) or (free_margin / equity) >= self.min_free_margin_ratio
         cond_session = self._in_trading_session()
         
-        if self.initial_equity is None: self.initial_equity = equity
-        cond_drawdown = equity >= self.initial_equity * (1 - self.max_drawdown)
+        cond_drawdown = not self.check_drawdown_breach(equity) # Verificăm Drawdown-ul absolut.
 
         result = cond_loss and cond_profit and cond_margin and cond_session and cond_drawdown
 
@@ -131,7 +182,7 @@ class RiskManager:
                 f"PierdereOK: {cond_loss} (P/L: {pnl_today:.2f}), "
                 f"ProfitOK: {cond_profit}, "
                 f"MarjăOK: {cond_margin}, "
-                f"DrawdownOK: {cond_drawdown} "
+                f"DrawdownOK: {cond_drawdown} (Peak: {self.peak_equity:.2f}) "
                 f"=> Rezultat: {result}"
             )
             self._last_can_trade_log_ts = now_ts
@@ -178,6 +229,7 @@ class RiskManager:
             return 0.0
         
         equity = float(account_info.equity)
+        # Atenție: Initial equity e folosit aici pentru a avea o referință
         if self.initial_equity is None:
             self.initial_equity = equity
         
@@ -201,7 +253,6 @@ class RiskManager:
         # Protecție pentru SL prea mic
         min_sl_distance = self.min_sl_pips * self.mt5.get_pip_size(symbol)
         if sl_distance_points < min_sl_distance:
-            self.logger.log(f"⚠️ SL prea mic ({sl_distance_points}), se folosește minimul {min_sl_distance} puncte.", "warning")
             sl_distance_points = min_sl_distance
 
         # Câți "ticks" sunt într-o unitate de preț (1.0)
@@ -228,7 +279,7 @@ class RiskManager:
         return lot
         
     def check_free_margin(self, symbol: str = None, lot: float = None, order_type: int = None) -> bool:
-        """Verificarea reală a marjei libere."""
+        """Verificarea reală a marjei libere (Logică neschimbată)."""
         if not self.mt5: return False
         info = self.mt5.get_account_info()
         if not info: return False
@@ -239,30 +290,39 @@ class RiskManager:
         ratio = free_margin / equity if equity > 0 else 0
         ok = ratio >= float(self.min_free_margin_ratio)
         if not ok:
-            # Acest log va apărea doar o dată pe oră (prin 'verbose=True' din BotManager)
             self.logger.log(f"❌ [check_free_margin] Free margin ratio={ratio:.2%} < min {self.min_free_margin_ratio:.2%}")
         return ok
         
-    def check_drawdown_breach(self) -> bool:
-        """Verificarea reală a drawdown-ului maxim al contului."""
-        info = self.mt5.get_account_info()
-        if not info: return False
-        equity = float(info.equity)
-        if self.initial_equity is None: self.initial_equity = equity; return False
-        if self.max_drawdown is None: return False
+    def check_drawdown_breach(self, current_equity: float = None) -> bool:
+        """
+        Verificarea Drawdown-ului absolut față de cel mai mare Equity atins (Peak Equity).
+        """
+        if self.peak_equity <= 0.0:
+            return False 
+            
+        equity = current_equity
+        if equity is None:
+            info = self.mt5.get_account_info()
+            equity = float(info.equity) if info else None
         
-        limit = self.initial_equity * (1 - float(self.max_drawdown))
+        if equity is None:
+            self.logger.log("Eroare la obținerea Equity pentru Drawdown Check.", "error")
+            return False
+
+        # Calculează pragul limită: Peak Equity * (1 - Max Drawdown Procentual)
+        limit = self.peak_equity * (1.0 - float(self.max_drawdown))
+        
         if equity < limit:
-            self.logger.log(f"⚠️ [RiskManager] Drawdown limit depășit! Equity={equity:.2f} < {limit:.2f}", "error")
+            self.logger.log(f"‼️ [RiskManager] Drawdown limit depășit! Equity={equity:.2f} < Prag Limită={limit:.2f} (Peak={self.peak_equity:.2f})", "error")
             return True
         return False
         
     def check_strategy_exposure(self, strategy: str, symbol: str) -> bool:
-        """Verificarea reală a expunerii."""
+        """Verificarea reală a expunerii (Logică neschimbată)."""
         limits = self.exposure_limits.get(strategy, {}).get(symbol, {})
         max_positions = int(limits.get("max_positions", 0))
         if max_positions <= 0:
-            return True  # fără limită
+            return True 
     
         positions = self.mt5.positions_get(symbol=symbol) or []
         pos_count = sum(1 for p in positions if getattr(p, "comment", "").startswith(strategy))
@@ -277,7 +337,7 @@ class RiskManager:
         return True
         
     def check_for_rollover_closure(self):
-        """Verificarea reală pentru închiderea de vineri."""
+        """Verificarea reală pentru închiderea de vineri (Logică neschimbată)."""
         now_utc = datetime.datetime.now(pytz.utc)
         if self.rollover_closure_executed: return True
         if now_utc.weekday() == 4 and now_utc.hour >= self.friday_close_hour_utc:

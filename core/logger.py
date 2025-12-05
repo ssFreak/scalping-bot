@@ -1,9 +1,11 @@
-# core/logger.py
+# core/logger.py - IMPLEMENTARE COMPLETĂ (FIX: Schimbat la CSV pentru performanță I/O)
+
 import os
 import logging
 from datetime import datetime
 import pandas as pd
 import sys 
+import traceback # Adăugat pentru logging detaliat
 
 class Logger:
     _console_handler_attached = False
@@ -14,15 +16,14 @@ class Logger:
         "ticket", "symbol", "order_type", "lot_size", "entry_price", "sl", "tp",
         "comment", "entry_time", "exit_price", "exit_time", "closed"
     ]
+    ALL_COLUMNS = BASE_COLUMNS + ML_COLUMNS # NOU: Definim coloanele totale
 
     def __init__(self, base_log_dir="bot.log"):
         self.base_log_dir = base_log_dir
         os.makedirs(self.base_log_dir, exist_ok=True)
         
-        # --- MODIFICARE ---
-        # 1. Fișierul de poziții este acum fix și în directorul de bază
-        self.positions_file = os.path.join(self.base_log_dir, "all_positions.xlsx")
-        # ------------------
+        # ‼️ FIX 1.1: Schimbăm de la Excel la CSV pentru performanță ‼️
+        self.positions_file = os.path.join(self.base_log_dir, "all_positions.csv")
         
         self.current_log_date = None
         self.session_dir = ""
@@ -45,35 +46,37 @@ class Logger:
         # Inițializăm fișierul de log text (care se va roti)
         self._check_and_rotate_log_file()
         
-        # Inițializăm fișierul Excel O SINGURĂ DATĂ
+        # Inițializăm fișierul de poziții O SINGURĂ DATĂ
         self._initialize_positions_file()
 
     def _initialize_positions_file(self):
         """
-        Verifică și inițializează fișierul 'all_positions.xlsx' o singură dată la pornire.
+        Verifică și inițializează fișierul 'all_positions.csv' o singură dată la pornire.
         """
         if not os.path.exists(self.positions_file):
-            df = pd.DataFrame(columns=self.BASE_COLUMNS + self.ML_COLUMNS)
-            df.to_excel(self.positions_file, index=False)
+            # ‼️ FIX 1.2: Inițializare ca CSV ‼️
+            df = pd.DataFrame(columns=self.ALL_COLUMNS)
+            df.to_csv(self.positions_file, index=False)
         else:
             # Verificăm dacă fișierul existent are noile coloane
             try:
-                df = pd.read_excel(self.positions_file)
+                # ‼️ FIX 1.3: Citire ca CSV ‼️
+                df = pd.read_csv(self.positions_file)
                 needs_update = False
                 for col in self.ML_COLUMNS:
                     if col not in df.columns:
                         df[col] = None 
                         needs_update = True
                 if needs_update:
-                    self.log(f"Actualizare 'all_positions.xlsx' cu noile coloane ML...", "info")
-                    df.to_excel(self.positions_file, index=False)
+                    self.log(f"Actualizare 'all_positions.csv' cu noile coloane ML...", "info")
+                    # ‼️ FIX 1.4: Scrierea ca CSV ‼️
+                    df.to_csv(self.positions_file, index=False)
             except Exception as e:
                 self.log(f"Eroare la verificarea coloanelor ML în {self.positions_file}: {e}", "error")
 
     def _check_and_rotate_log_file(self):
         """
-        Verifică data curentă. Dacă este o zi nouă, creează un nou
-        folder și un nou FileHandler DOAR PENTRU log.txt.
+        Verifică data curentă și rotește fișierul log.txt zilnic (Logică neschimbată).
         """
         today_str = datetime.now().strftime("%Y_%m_%d")
         
@@ -106,8 +109,6 @@ class Logger:
             file_handler = logging.FileHandler(new_log_file, encoding='utf-8', errors='replace') 
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
-
-            # --- MODIFICARE: Am scos logica positions.xlsx de aici ---
             
             if old_handler: # Nu logăm la prima rulare
                 self.log(f"--- S-a creat un nou fișier log.txt pentru ziua {today_str} ---", "info")
@@ -116,7 +117,7 @@ class Logger:
             print(f"EROARE CRITICĂ ÎN LOGGER (rotire fișier): {e}")
 
     def log(self, message, level="info"):
-        """Wrapper pentru a loga mesajul, verificând mai întâi data."""
+        """Wrapper pentru a loga mesajul, verificând mai întâi data (Logică neschimbată)."""
         self._check_and_rotate_log_file() # Verificăm la fiecare apel
         
         if level == "info": self.logger.info(message)
@@ -128,59 +129,70 @@ class Logger:
         self,
         ticket: int,
         symbol: str,
-        order_type: int,
-        lot_size: float,
-        entry_price: float,
-        sl: float,
-        tp: float,
+        order_type: str, # BUY/SELL/CLOSE
+        lot_size: float = 0.0,
+        entry_price: float = 0.0,
+        sl: float = 0.0,
+        tp: float = 0.0,
         comment="",
-        closed=False,
-        exit_price=None,
+        closed: bool = False,
+        exit_price: float = None,
         ml_features: dict = None
     ):
-        """Scrie în fișierul unic all_positions.xlsx."""
-        
-        # Asigurăm că logul text este corect (pentru erori)
+        """
+        Scrie în fișierul unic all_positions.csv. 
+        ‼️ NOU: Folosim logica Fazei 1 (Open) / Fazei 2 (Close) pentru append rapid ‼️
+        """
+        if ml_features is None: ml_features = {}
         self._check_and_rotate_log_file() 
         
         try:
-            # Citim fișierul unic
-            df = pd.read_excel(self.positions_file)
-
+            # ‼️ FIX: Logare optimizată (doar append) ‼️
+            
             if not closed:
+                # FAZA 1: DESCHIDERE (Append rapid)
                 new_row = {
                     "ticket": ticket, "symbol": symbol, "order_type": order_type,
                     "lot_size": lot_size, "entry_price": entry_price, "sl": sl, "tp": tp,
-                    "comment": comment, "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "exit_price": None, "exit_time": None, "closed": False,
+                    "comment": comment, 
+                    "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "exit_price": None, "exit_time": None, 
+                    "closed": False, # Explicit False pentru deschidere
                 }
-                if ml_features:
-                    for col in self.ML_COLUMNS:
-                        new_row[col] = ml_features.get(col)
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                
             else:
-                # Actualizăm linia existentă (la închidere)
-                mask = (df["ticket"] == ticket) & (df["closed"] == False)
-                if mask.any():
-                    df.loc[mask, "exit_price"] = exit_price
-                    df.loc[mask, "exit_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    df.loc[mask, "closed"] = True
-                else:
-                    # Dacă tranzacția nu e găsită (poate a fost deschisă în altă zi), o adăugăm ca închisă
-                    if not df[df['ticket'] == ticket].empty:
-                        pass # Ticketul a fost deja închis (ex: la un restart)
-                    else:
-                        self.log(f"Ticketul {ticket} (închidere) nu a fost găsit în log. Se adaugă ca închis.", "warning")
-                        new_row = {
-                            "ticket": ticket, "symbol": symbol, "order_type": order_type,
-                            "lot_size": lot_size, "entry_price": "UNKNOWN", "sl": sl, "tp": tp,
-                            "comment": f"Closed ticket {ticket}", "entry_time": "UNKNOWN",
-                            "exit_price": exit_price, "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "closed": True,
-                        }
-                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                # FAZA 2: ÎNCHIDERE (Append rapid, referință la ticket-ul original)
+                new_row = {
+                    # Copiază informațiile cheie de referință
+                    "ticket": ticket, "symbol": symbol, "order_type": "CLOSE", 
+                    "lot_size": lot_size, # Loghează lotul închis
+                    
+                    # Detalii de închidere
+                    "entry_price": None, "sl": None, "tp": None, "comment": f"Close for {ticket}",
+                    "entry_time": None, 
+                    
+                    "exit_price": exit_price, 
+                    "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                    "closed": True, # Explicit True pentru închidere
+                }
+                
+                # Setează ML Features la None pentru rândul de închidere
+                for col in self.ML_COLUMNS:
+                    new_row[col] = None 
+                
+            # Adaugă ML Features doar la rândul de deschidere
+            if not closed:
+                for col in self.ML_COLUMNS:
+                    new_row[col] = ml_features.get(col, None)
+            
+            df = pd.DataFrame([new_row], columns=self.ALL_COLUMNS)
+            
+            # Scriere cu append (mult mai rapid decât rescrierea)
+            header = not os.path.exists(self.positions_file)
+            df.to_csv(self.positions_file, mode='a', header=header, index=False)
+                
+            if closed:
+                 self.log(f"✅ Poziția {ticket} ({symbol}) închisă cu succes (Log append).", "info")
 
-            df.to_excel(self.positions_file, index=False)
         except Exception as e:
             self.log(f"❌ Eroare la scrierea în {self.positions_file}: {e}", level="error")
+            self.log(traceback.format_exc(), "debug")

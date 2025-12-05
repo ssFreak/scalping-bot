@@ -1,23 +1,14 @@
-# validate.py
-# 
-# ACESTA ESTE SCRIPTUL UNIVERSAL DE VALIDARE (Backtest Unic)
-# 
-# Cum se folosește:
-# 1. Asigură-te că fișierul config.yaml conține parametrii optimi pentru simbolul dorit.
-# 2. Asigură-te că ai datele (ex: EURUSD_M5_5Y.csv) în folderul /data.
-# 3. Modifică variabila 'SYMBOL_TO_TEST' de mai jos.
-# 4. Rulează: python validate.py
-#
+# validation_ema_rsi.py - IMPLEMENTARE COMPLETĂ (FIX: Nume fișier și Buclă Backtest)
+
 import pandas as pd
 import yaml
 import sys
 
+# Asigură-te că aceste importuri sunt corecte
 from core.backtest_broker import BacktestBroker
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
-# Adaugă aici importuri pentru alte strategii pe măsură ce le validezi
-# from strategies.pivot_strategy import PivotStrategy
 
-# --- Funcțiile de pre-procesare (Copiate din optimizatoare) ---
+# --- Funcțiile de pre-procesare (Rămân neschimbate) ---
 
 def load_and_prepare_data(file_path):
     """Încarcă și pregătește un fișier de date (format MT5 Tab)."""
@@ -61,7 +52,7 @@ def preprocess_data_ema_rsi(data_paths, symbol, h1_ema_period, m5_atr_period, m5
     print("[INFO] Pre-procesare finalizată.")
     return combined_df
 
-# --- Funcția principală de rulare a backtest-ului ---
+# --- Funcția principală de rulare a backtest-ului (CORECTATĂ) ---
 def run_validation_backtest(config, data_paths, symbol, strategy_class, strategy_name_key):
     
     # Extragem configurația corectă
@@ -69,13 +60,12 @@ def run_validation_backtest(config, data_paths, symbol, strategy_class, strategy
         base_strategy_config = config['strategies'][strategy_name_key]
         symbol_config = base_strategy_config.get('symbol_settings', {}).get(symbol, {})
         
-        # Combinăm configurația de bază cu cea specifică simbolului
         final_config = {**base_strategy_config, **symbol_config}
     except KeyError:
         print(f"EROARE: Nu s-au găsit setări în config.yaml pentru strategia '{strategy_name_key}' sau simbolul '{symbol}'")
         sys.exit()
     
-    # 1. Pre-procesăm datele (logica trebuie să fie specifică strategiei)
+    # 1. Pre-procesăm datele
     print(f"--- Se rulează backtest-ul de validare pentru {strategy_name_key} pe {symbol} ---")
     
     try:
@@ -84,11 +74,6 @@ def run_validation_backtest(config, data_paths, symbol, strategy_class, strategy
             m5_atr_period = final_config.get('m5_atr_period', 14)
             m5_rsi_period = final_config.get('m5_rsi_period', 14)
             processed_data = preprocess_data_ema_rsi(data_paths, symbol, h1_ema_period, m5_atr_period, m5_rsi_period)
-        
-        # --- (Poți adăuga 'elif' pentru alte strategii în viitor) ---
-        # elif strategy_name_key == 'pivot':
-        #     processed_data = preprocess_data_pivot(...) 
-            
         else:
             print(f"EROARE: Nu există o funcție de pre-procesare definită pentru '{strategy_name_key}'")
             sys.exit()
@@ -97,48 +82,78 @@ def run_validation_backtest(config, data_paths, symbol, strategy_class, strategy
         print(f"EROARE FATALĂ la pre-procesarea datelor: {e}")
         sys.exit()
 
-    # 2. Creăm brokerul
-    broker = BacktestBroker(
-        processed_data=processed_data, 
-        config=config, 
-        initial_equity=200.0
-    )
+    # 2. Creăm brokerul (Portofoliu)
+    # ‼️ FIX 1: Inițializare Broker fără 'processed_data' ‼️
+    broker = BacktestBroker(config=config, initial_equity=200.0)
     
     # 3. Creăm strategia
     strategy = strategy_class(symbol=symbol, config=final_config, broker_context=broker)
     
-    # 4. Rulăm simularea
+    # 4. Rulăm simularea (Buclă Portofoliu)
     print(f"Se rulează simularea rapidă pe {len(processed_data)} bare...")
-    while broker.advance_time():
-        strategy.run_once()
+    
+    # ‼️ FIX 2: Buclă de backtest corectă (simulare ticker) ‼️
+    for index, bar_data in processed_data.iterrows():
+        timestamp = index
+        
+        # 4a. Setăm datele curente în broker
+        broker.set_current_data(timestamp, {symbol: bar_data})
+        
+        # 4b. Rulăm logica strategiei
+        strategy.run_once(current_bar=bar_data) 
+        
+        # 4c. Actualizăm P/L-ul
+        broker.update_all_positions()
 
     # 5. Generăm raportul final
-    broker.generate_report(report_filename=f"validation_report_{strategy_name_key}_{symbol}.txt")
+    # ‼️ FIX 3: Apelarea funcției corecte generate_portfolio_report ‼️
+    broker.generate_portfolio_report(
+        symbols_tested=[symbol], 
+        report_filename=f"validation_report_{strategy_name_key}_{symbol}_9Y.txt"
+    )
 
 
 if __name__ == "__main__":
     
-    # --- EDITEAZĂ AICI ---
-    SYMBOL_TO_TEST = "EURGBP"
-    STRATEGY_TO_TEST = EMARsiTrendScalper
-    STRATEGY_NAME_KEY = "ema_rsi_scalper" # Numele exact din config.yaml
-    # ---------------------
-    
+    # 1. Încărcăm Configurația
     with open("config/config.yaml", 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    print(f"Se folosesc parametrii din 'config/config.yaml' pentru {STRATEGY_NAME_KEY} -> {SYMBOL_TO_TEST}")
+    STRATEGY_TO_TEST = EMARsiTrendScalper
+    STRATEGY_NAME_KEY = "ema_rsi_scalper"
+    
+    # 2. Extragem automat simbolurile ENABLED din config
+    settings = config.get('strategies', {}).get(STRATEGY_NAME_KEY, {}).get('symbol_settings', {})
+    active_symbols = [s for s, p in settings.items() if p.get('enabled', False)]
+    
+    print(f"🚀 Se pornește validarea extinsă (9 Ani) pentru {len(active_symbols)} simboluri: {active_symbols}")
 
-    # Folosim noua ta convenție de nume de fișiere
-    DATA_PATHS = {
-        "M5": f"data/{SYMBOL_TO_TEST}_M5_5Y.csv",
-        "H1": f"data/{SYMBOL_TO_TEST}_H1_5Y.csv"
-    }
+    for symbol in active_symbols:
+        print("\n" + "="*60)
+        print(f"📊 Validare: {symbol}")
+        print("="*60)
+        
+        # Construim căile pentru fișierele de 9 ani
+        DATA_PATHS = {
+            "M5": f"data/{symbol}_M5_9Y.csv",
+            "H1": f"data/{symbol}_H1_9Y.csv"
+        }
+        
+        # Verificăm dacă fișierele există înainte de a rula
+        import os
+        if not os.path.exists(DATA_PATHS['M5']) or not os.path.exists(DATA_PATHS['H1']):
+            print(f"❌ SKIP {symbol}: Fișierele _9Y.csv lipsesc din folderul data/")
+            continue
 
-    run_validation_backtest(
-        config=config,
-        data_paths=DATA_PATHS,
-        symbol=SYMBOL_TO_TEST,
-        strategy_class=STRATEGY_TO_TEST,
-        strategy_name_key=STRATEGY_NAME_KEY
-    )
+        try:
+            run_validation_backtest(
+                config=config,
+                data_paths=DATA_PATHS,
+                symbol=symbol,
+                strategy_class=STRATEGY_TO_TEST,
+                strategy_name_key=STRATEGY_NAME_KEY
+            )
+        except Exception as e:
+            print(f"❌ Eroare la validarea {symbol}: {e}")
+
+    print("\n✅ Validare completă pentru toate simbolurile active.")
