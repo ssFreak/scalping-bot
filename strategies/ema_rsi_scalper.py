@@ -57,8 +57,12 @@ class EMARsiTrendScalper(BaseStrategy):
                 if df_trend is None or len(df_trend) < self.ema_period_trend: return
                 
                 trend_ema_series = df_trend['close'].ewm(span=self.ema_period_trend, adjust=False).mean()
-                trend_up = df_trend['close'].iloc[-1] > trend_ema_series.iloc[-1]
-                current_trend_ema = trend_ema_series.iloc[-1]
+                
+                # 🛑 FIX LIVE: Verificăm trendul pe bara ANTERIOARĂ (Închisă)
+                # iloc[-1] este bara curentă (neterminată). iloc[-2] este ultima închisă.
+                trend_up = df_trend['close'].iloc[-2] > trend_ema_series.iloc[-2]
+                
+                current_trend_ema = trend_ema_series.iloc[-1] # Pentru distanță e OK cea curentă
                 
                 df_base = self.broker.get_historical_data(self.symbol, self.timeframe_base_live, count=150)
                 if df_base is None or df_base.empty or len(df_base) < 50: return

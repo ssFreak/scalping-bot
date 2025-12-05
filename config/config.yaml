@@ -9,8 +9,8 @@ general:
   daily_profit: 500.0
   daily_loss: -200.0
   max_drawdown: 0.30
-  risk_per_trade: 0.02
-  max_position_lot: 1.0
+  risk_per_trade: 0.015
+  max_position_lot: 2.5
   min_free_margin_ratio: 0.6
   session_hours: []
   deviation: 10

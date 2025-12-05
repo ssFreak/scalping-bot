@@ -1,10 +1,22 @@
-# portofolio_validator_combined.py - MULTI-STRATEGY BACKTEST
+# validators/portofolio_validator_combined.py - PATHS FIXED
+
+import sys
+import os
+
+# --- 1. FIX IMPORTURI: Adăugăm rădăcina proiectului în sys.path ---
+# Obținem folderul curent (validators)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# Obținem rădăcina proiectului (un nivel mai sus: scalping-bot)
+PROJECT_ROOT = os.path.dirname(current_dir)
+sys.path.append(PROJECT_ROOT)
+# ------------------------------------------------------------------
 
 import pandas as pd
 import yaml
-import sys
-import os
 import numpy as np
+from datetime import datetime
+
+# Acum importurile vor funcționa corect
 from core.backtest_broker import BacktestBroker
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
 from strategies.bb_scalper import BollingerReversionScalper
@@ -55,8 +67,10 @@ def preprocess_data_ema_rsi(data_paths, symbol, ema_period, atr_period, rsi_peri
     if df_m5 is None or df_h1 is None: raise FileNotFoundError(f"Date M5/H1 lipsă {symbol}")
 
     df_h1['H1_ema_trend'] = df_h1['close'].ewm(span=ema_period, adjust=False).mean()
-    df_h1['H1_trend_up'] = df_h1['close'] > df_h1['H1_ema_trend']
-    df_h1_to_merge = df_h1[['H1_trend_up']] 
+    
+    # FIX: Shift pentru a evita Lookahead Bias
+    df_h1['H1_trend_up'] = (df_h1['close'] > df_h1['H1_ema_trend']).shift(1)
+    df_h1_to_merge = df_h1[['H1_trend_up']].dropna()
     
     df_m5['M5_atr'] = EMARsiTrendScalper._calculate_atr(df_m5, atr_period, 'ema')
     df_m5['M5_rsi'] = EMARsiTrendScalper._calculate_rsi(df_m5, rsi_period)
@@ -85,8 +99,6 @@ def run_combined_backtest(config):
     broker = BacktestBroker(config=config, initial_equity=initial_equity)
     
     all_data = {} 
-    # Structură: { "Strategie_Simbol": strategy_instance }
-    # Ex: "EMA_EURUSD": instance, "BB_EURUSD": instance
     active_strategies = {} 
     master_index = None
     
@@ -97,7 +109,6 @@ def run_combined_backtest(config):
 
     print(f"\n🚀 START VALIDARE COMBINATĂ (Capital: ${initial_equity})")
 
-    # --- A. ÎNCĂRCARE STRATEGII & DATE ---
     for strat_name, strat_config in config.get('strategies', {}).items():
         if not strat_config.get('enabled', False):
             continue
@@ -114,30 +125,20 @@ def run_combined_backtest(config):
         
         for symbol in active_symbols:
             try:
-                # 1. Configurare specifică
                 sym_conf = symbol_settings[symbol]
                 final_conf = {**strat_config, **sym_conf}
                 
-                # 2. Pre-procesare (doar dacă nu am încărcat deja datele pentru acest simbol)
-                # Avem nevoie de date specifice per strategie. 
-                # EMA vrea H1+M5+RSI+ATR. BB vrea M5+Bands+ADX.
-                # Soluție: Dacă simbolul există deja în all_data (de la cealaltă strategie), 
-                # trebuie să facem MERGE la coloane sau să re-procesăm.
-                # Pentru simplitate și siguranță, vom crea seturi de date separate în memorie dacă e nevoie,
-                # dar BacktestBroker acceptă un singur feed per simbol.
-                # FIX: Vom face un "Super DataFrame" per simbol care conține toți indicatorii necesari.
-                
+                # --- FIX CĂI DATE ---
+                # Folosim os.path.join cu PROJECT_ROOT pentru a găsi datele
                 data_paths = {
-                    "M5": f"data/{symbol}_M5_9Y.csv",
-                    "H1": f"data/{symbol}_H1_9Y.csv"
+                    "M5": os.path.join(PROJECT_ROOT, "data", f"{symbol}_M5_9Y.csv"),
+                    "H1": os.path.join(PROJECT_ROOT, "data", f"{symbol}_H1_9Y.csv")
                 }
 
-                # Verificăm fișierele
                 if not os.path.exists(data_paths['M5']):
-                    print(f"❌ Lipsă date {symbol}")
+                    print(f"❌ Lipsă date {symbol} la calea: {data_paths['M5']}")
                     continue
 
-                # Calculăm indicatorii specifici
                 if strat_name == 'ema_rsi_scalper':
                     df_new = preprocess_data_ema_rsi(data_paths, symbol, 
                                 final_conf.get('ema_period',50), 
@@ -149,26 +150,16 @@ def run_combined_backtest(config):
                                 final_conf.get('bb_dev',2.0), 
                                 final_conf.get('adx_period',14))
                 
-                # MERGE în all_data
                 if symbol not in all_data:
                     all_data[symbol] = df_new
                 else:
-                    # Dacă simbolul există deja, adăugăm coloanele noi
-                    # Ex: all_data[symbol] are deja EMA, acum adăugăm BB
                     existing_df = all_data[symbol]
-                    # Facem join pe index (timp)
-                    # Folosim combine_first sau join. Join e mai sigur.
-                    # Trebuie să ne asigurăm că nu duplicăm coloane (open, close etc)
                     cols_to_use = df_new.columns.difference(existing_df.columns)
                     all_data[symbol] = existing_df.join(df_new[cols_to_use], how='outer')
-                    # După join, s-ar putea să avem goluri (NaN) dacă M5/H1 diferă ușor, facem ffill după
                 
-                # Instanțiere Strategie
-                # Cheie unică: NumeStrategie_Simbol (ex: ema_rsi_scalper_EURUSD)
                 instance_key = f"{strat_name}_{symbol}"
                 active_strategies[instance_key] = strat_class(symbol=symbol, config=final_conf, broker_context=broker)
                 
-                # Index comun
                 if master_index is None:
                     master_index = all_data[symbol].index
                 else:
@@ -177,12 +168,14 @@ def run_combined_backtest(config):
             except Exception as e:
                 print(f"❌ Eroare la {symbol}: {e}")
 
-    # --- B. SIMULARE ---
     print(f"\n⏳ Sincronizare și Rulare Simulare ({len(active_strategies)} instanțe active)...")
     
+    if master_index is None:
+        print("❌ Nu au fost încărcate date. Verifică paths.")
+        return
+
     master_index_unique = master_index.unique().sort_values()
     
-    # Reindexare și umplere goluri
     for sym in all_data:
         all_data[sym] = all_data[sym].reindex(master_index_unique, method='ffill')
     
@@ -191,39 +184,39 @@ def run_combined_backtest(config):
     for i in range(total_bars):
         timestamp = master_index_unique[i]
         
-        # 1. Feed date curent
         current_data_map = {}
         for sym, df in all_data.items():
             current_data_map[sym] = df.iloc[i]
             
         broker.set_current_data(timestamp, current_data_map)
         
-        # 2. Execuție Strategii
         for key, strategy in active_strategies.items():
-            # Strategia știe ce simbol are (self.symbol)
-            # Extragem datele pentru simbolul ei
             bar = current_data_map.get(strategy.symbol)
             if bar is not None:
                 strategy.run_once(current_bar=bar)
         
-        # 3. Update Poziții
         broker.update_all_positions()
         
         if i % 100000 == 0 and i > 0:
             print(f"  [{i}/{total_bars}] {timestamp} | Equity: ${broker.equity:.2f}")
 
-    # --- C. RAPORT FINAL ---
     print("\n✅ Validare Combinată Finalizată.")
-    broker.generate_portfolio_report(list(active_strategies.keys()), "PORTFOLIO_COMBINED_9Y.txt")
+    
+    # Salvare raport în folderul validators
+    report_path = os.path.join(current_dir, "PORTFOLIO_COMBINED_9Y.txt")
+    broker.generate_portfolio_report(list(active_strategies.keys()), report_path)
 
 if __name__ == "__main__":
+    
+    # --- FIX CALE CONFIG ---
+    config_path = os.path.join(PROJECT_ROOT, "config", "config.yaml")
+    
     try:
-        with open("config/config.yaml", 'r', encoding='utf-8') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
     except Exception as e:
-        sys.exit(f"Config error: {e}")
+        sys.exit(f"Config error la {config_path}: {e}")
 
-    # Capital Test
     config['general']['portfolio_initial_equity'] = 2000.0
     
     run_combined_backtest(config)
