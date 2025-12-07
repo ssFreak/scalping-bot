@@ -18,8 +18,6 @@ from datetime import datetime
 from core.backtest_broker import BacktestBroker
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
 from strategies.bb_scalper import BollingerReversionScalper
-# Dacă ai creat fișierul pentru Asian Breakout, decomentează linia de mai jos:
-# from strategies.asian_breakout import AsianBreakoutStrategy
 
 # --- 1. Helper Functions & Pre-processing (HONEST LOGIC KEPT) ---
 

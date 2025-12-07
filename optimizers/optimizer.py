@@ -150,27 +150,6 @@ def suggest_params_bb(trial):
         'bb_dev': trial.suggest_float('bb_dev', 2.0, 3.5, step=0.1),
         'adx_max': trial.suggest_float('adx_max', 20.0, 50.0, step=5.0)
     }
-    
-# --- C. ASIAN BREAKOUT ---
-def prepare_data_asian(symbol, config, trial=None):
-    # Această strategie nu are nevoie de indicatori complecși, doar OHLC
-    path_m15 = os.path.join(PROJECT_ROOT, "data", f"{symbol}_M15_2Y.csv") # Folosim M15
-    if not os.path.exists(path_m15): return None
-    return load_raw_data(path_m15)
-
-def suggest_params_asian(trial):
-    return {
-        # Căutăm ora ideală de start/stop
-        'range_start_hour': trial.suggest_int('range_start_hour', 0, 2), # 00:00 - 02:00
-        'range_end_hour': trial.suggest_int('range_end_hour', 7, 9),     # 07:00 - 09:00
-        
-        # Buffer de siguranță (să nu fie fakeout)
-        'breakout_buffer': trial.suggest_float('breakout_buffer', 1.0, 5.0, step=0.5),
-        
-        # Risk Management (Fixed Pips)
-        'sl_pips': trial.suggest_float('sl_pips', 15.0, 40.0, step=5.0),
-        'tp_pips': trial.suggest_float('tp_pips', 30.0, 100.0, step=10.0)
-    }
 
 # ==============================================================================
 # 3. REGISTRUL DE STRATEGII
@@ -187,12 +166,6 @@ STRATEGY_REGISTRY = {
         'prepare_func': prepare_data_bb,
         'dynamic_data': True,
         'suggest_func': suggest_params_bb
-    },
-    'asian_breakout': {
-        'class': AsianBreakoutStrategy, # Va trebui să imporți clasa sus
-        'prepare_func': prepare_data_asian,
-        'dynamic_data': False, # Datele OHLC nu se schimbă
-        'suggest_func': suggest_params_asian
     }
 }
 
@@ -243,7 +216,7 @@ def objective(trial, base_config, symbol, strategy_key, strategy_meta, df_raw_ca
 if __name__ == "__main__":
     
     # --- CONFIGURARE ---
-    TARGET_STRATEGY = 'ema_rsi_scalper' 
+    TARGET_STRATEGY = 'asian_breakout' 
     TOTAL_TRIALS = 250
     # -------------------
     

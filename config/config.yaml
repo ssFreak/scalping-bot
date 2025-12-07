@@ -58,22 +58,3 @@ strategies:
       # Strategici (Perioade lungi, Mean Reversion clasic)
       AUDNZD: {enabled: true, magic_number_offset: 5, bb_period: 40, bb_dev: 3.5, adx_max: 50.0}
       AUDCAD: {enabled: true, magic_number_offset: 6, bb_period: 40, bb_dev: 3.3, adx_max: 50.0}
-
-  # === STRATEGIA C: ASIAN BREAKOUT ===
-  asian_breakout:
-    enabled: true
-    magic_number_base: 39305120
-    
-    # Parametri Default
-    timeframe: "M15"
-    range_start_hour: 1
-    range_end_hour: 8
-    breakout_buffer: 2.0
-    sl_pips: 20.0
-    tp_pips: 60.0
-    
-    symbol_settings:
-      GBPUSD: {enabled: true, magic_number_offset: 1, sl_pips: 25.0, tp_pips: 75.0}
-      GBPJPY: {enabled: true, magic_number_offset: 2, breakout_buffer: 3.0, sl_pips: 35.0, tp_pips: 100.0}
-      EURUSD: {enabled: true, magic_number_offset: 3, sl_pips: 15.0, tp_pips: 45.0}
-      USDJPY: {enabled: true, magic_number_offset: 4, sl_pips: 20.0, tp_pips: 60.0}
