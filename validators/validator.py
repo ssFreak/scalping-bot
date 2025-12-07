@@ -1,12 +1,10 @@
-# validators/portofolio_validator_combined.py - PATHS FIXED
+# validators/portofolio_validator_combined.py - MENU ADDED & PATHS FIXED
 
 import sys
 import os
 
 # --- 1. FIX IMPORTURI: Adăugăm rădăcina proiectului în sys.path ---
-# Obținem folderul curent (validators)
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# Obținem rădăcina proiectului (un nivel mai sus: scalping-bot)
 PROJECT_ROOT = os.path.dirname(current_dir)
 sys.path.append(PROJECT_ROOT)
 # ------------------------------------------------------------------
@@ -16,12 +14,14 @@ import yaml
 import numpy as np
 from datetime import datetime
 
-# Acum importurile vor funcționa corect
+# Importurile claselor
 from core.backtest_broker import BacktestBroker
 from strategies.ema_rsi_scalper import EMARsiTrendScalper
 from strategies.bb_scalper import BollingerReversionScalper
+# Dacă ai creat fișierul pentru Asian Breakout, decomentează linia de mai jos:
+# from strategies.asian_breakout import AsianBreakoutStrategy
 
-# --- 1. Helper Functions & Pre-processing ---
+# --- 1. Helper Functions & Pre-processing (HONEST LOGIC KEPT) ---
 
 def calculate_adx_series(df, period=14):
     """Calcul ADX standard (Pandas)."""
@@ -59,8 +59,6 @@ def load_and_prepare_data(file_path):
     except Exception as e:
         print(f"EROARE la încărcarea {file_path}: {e}")
         return None
-
-# --- ÎNLOCUIEȘTE ACESTE DOUĂ FUNCȚII ÎN portofolio_validator_combined.py ---
 
 def preprocess_data_ema_rsi(data_paths, symbol, ema_period, atr_period, rsi_period):
     print(f"[INFO] Pre-procesare {symbol} (EMA Trend)...")
@@ -114,9 +112,22 @@ def preprocess_data_bb(data_paths, symbol, bb_period, bb_dev, adx_period):
     df_m5.dropna(inplace=True)
     return df_m5
 
+# --- C. ASIAN BREAKOUT PREPROCESSOR (Dacă ai adăugat strategia) ---
+def preprocess_data_asian(data_paths, symbol):
+    print(f"[INFO] Pre-procesare {symbol} (Asian Breakout)...")
+    # Asian Breakout nu are nevoie de indicatori complecși calculați aici,
+    # doar de datele raw OHLC. Folosim M15 sau M5.
+    df = load_and_prepare_data(data_paths['M15']) # Sau M5, depinde de config
+    if df is None: raise FileNotFoundError(f"Date M15 lipsă {symbol}")
+    return df
+
 # --- 2. Main Logic ---
 
-def run_combined_backtest(config):
+def run_combined_backtest(config, target_strategies=None):
+    """
+    target_strategies: Lista cu numele strategiilor de rulat (ex: ['ema_rsi_scalper']).
+                       Dacă e None, le rulează pe toate cele active.
+    """
     initial_equity = config.get('general', {}).get('portfolio_initial_equity', 2000.0)
     broker = BacktestBroker(config=config, initial_equity=initial_equity)
     
@@ -126,18 +137,31 @@ def run_combined_backtest(config):
     
     strategy_map = {
         'ema_rsi_scalper': EMARsiTrendScalper,
-        'bb_range_scalper': BollingerReversionScalper
+        'bb_range_scalper': BollingerReversionScalper,
+        # 'asian_breakout': AsianBreakoutStrategy  # Decomentează dacă ai clasa
     }
 
-    print(f"\n🚀 START VALIDARE COMBINATĂ (Capital: ${initial_equity})")
+    # Determinăm ce strategii rulăm
+    available_in_config = config.get('strategies', {})
+    
+    # Dacă nu am primit o listă specifică, luăm tot ce e enabled
+    if target_strategies is None:
+        target_strategies = [k for k, v in available_in_config.items() if v.get('enabled', False)]
+    
+    print(f"\n🚀 START VALIDARE (Capital: ${initial_equity})")
+    print(f"🎯 Strategii selectate: {target_strategies}")
 
-    for strat_name, strat_config in config.get('strategies', {}).items():
-        if not strat_config.get('enabled', False):
+    for strat_name in target_strategies:
+        strat_config = available_in_config.get(strat_name)
+        
+        # Dublă verificare (deși meniul filtrează, e bine să fim siguri)
+        if not strat_config or not strat_config.get('enabled', False):
+            print(f"⚠️ Strategia {strat_name} nu este activă în config sau nu există.")
             continue
             
         strat_class = strategy_map.get(strat_name)
         if not strat_class:
-            print(f"⚠️ Strategie necunoscută în config: {strat_name}")
+            print(f"⚠️ Clasa pentru strategia '{strat_name}' nu este mapată în script.")
             continue
 
         print(f"\n🔹 Încărcare Strategie: {strat_name}")
@@ -154,23 +178,39 @@ def run_combined_backtest(config):
                 # Folosim os.path.join cu PROJECT_ROOT pentru a găsi datele
                 data_paths = {
                     "M5": os.path.join(PROJECT_ROOT, "data", f"{symbol}_M5_9Y.csv"),
+                    "M15": os.path.join(PROJECT_ROOT, "data", f"{symbol}_M15_9Y.csv"),
                     "H1": os.path.join(PROJECT_ROOT, "data", f"{symbol}_H1_9Y.csv")
                 }
 
-                if not os.path.exists(data_paths['M5']):
-                    print(f"❌ Lipsă date {symbol} la calea: {data_paths['M5']}")
-                    continue
-
+                # Verificare existență fișiere de bază (depinde de strategie)
+                # Aici facem o verificare generică, preprocessori specifici vor arunca erori dacă lipsește ceva critic
+                
+                df_new = None
+                
                 if strat_name == 'ema_rsi_scalper':
+                    if not os.path.exists(data_paths['M5']):
+                        print(f"❌ Lipsă date M5 pentru {symbol}"); continue
                     df_new = preprocess_data_ema_rsi(data_paths, symbol, 
                                 final_conf.get('ema_period',50), 
                                 final_conf.get('atr_period',14), 
                                 final_conf.get('rsi_period',14))
+                                
                 elif strat_name == 'bb_range_scalper':
+                    if not os.path.exists(data_paths['M5']):
+                        print(f"❌ Lipsă date M5 pentru {symbol}"); continue
                     df_new = preprocess_data_bb(data_paths, symbol, 
                                 final_conf.get('bb_period',20), 
                                 final_conf.get('bb_dev',2.0), 
                                 final_conf.get('adx_period',14))
+                                
+                elif strat_name == 'asian_breakout':
+                     if not os.path.exists(data_paths['M15']):
+                        print(f"❌ Lipsă date M15 pentru {symbol}"); continue
+                     df_new = preprocess_data_asian(data_paths, symbol)
+
+                if df_new is None:
+                    print(f"❌ Nu s-au putut procesa datele pentru {symbol} ({strat_name})")
+                    continue
                 
                 if symbol not in all_data:
                     all_data[symbol] = df_new
@@ -193,7 +233,7 @@ def run_combined_backtest(config):
     print(f"\n⏳ Sincronizare și Rulare Simulare ({len(active_strategies)} instanțe active)...")
     
     if master_index is None:
-        print("❌ Nu au fost încărcate date. Verifică paths.")
+        print("❌ Nu au fost încărcate date. Verifică paths sau dacă strategiile selectate au simboluri active.")
         return
 
     master_index_unique = master_index.unique().sort_values()
@@ -222,11 +262,15 @@ def run_combined_backtest(config):
         if i % 100000 == 0 and i > 0:
             print(f"  [{i}/{total_bars}] {timestamp} | Equity: ${broker.equity:.2f}")
 
-    print("\n✅ Validare Combinată Finalizată.")
+    print("\n✅ Validare Finalizată.")
     
     # Salvare raport în folderul validators
-    report_path = os.path.join(current_dir, "PORTFOLIO_COMBINED_9Y.txt")
+    suffix = "_COMBINED" if len(target_strategies) > 1 else f"_{target_strategies[0].upper()}"
+    report_filename = f"REPORT_9Y{suffix}.txt"
+    report_path = os.path.join(current_dir, report_filename)
+    
     broker.generate_portfolio_report(list(active_strategies.keys()), report_path)
+    print(f"📝 Raport salvat în: {report_filename}")
 
 if __name__ == "__main__":
     
@@ -241,4 +285,39 @@ if __name__ == "__main__":
 
     config['general']['portfolio_initial_equity'] = 2000.0
     
-    run_combined_backtest(config)
+    # --- MENIU INTERACTIV ---
+    
+    # 1. Identificăm strategiile active în config
+    available_strats = [k for k, v in config.get('strategies', {}).items() if v.get('enabled', False)]
+    
+    if not available_strats:
+        print("⚠️ Nu există nicio strategie activă (enabled: true) în config.yaml.")
+        sys.exit()
+
+    print("\n" + "="*40)
+    print("      OPȚIUNI VALIDARE BACKTEST")
+    print("="*40)
+    print("0. ✅ TOATE COMBINATE (Portfolio Mode)")
+    
+    for i, name in enumerate(available_strats):
+        print(f"{i+1}. 📈 Doar {name}")
+        
+    print("="*40)
+    
+    try:
+        choice = input(f"Alege o opțiune (0-{len(available_strats)}): ").strip()
+        choice_idx = int(choice)
+        
+        if choice_idx == 0:
+            # Rulăm tot
+            run_combined_backtest(config, target_strategies=available_strats)
+        elif 1 <= choice_idx <= len(available_strats):
+            # Rulăm doar strategia selectată
+            selected_strat = available_strats[choice_idx - 1]
+            run_combined_backtest(config, target_strategies=[selected_strat])
+        else:
+            print("❌ Opțiune invalidă.")
+    except ValueError:
+        print("❌ Te rog introdu un număr valid.")
+    except KeyboardInterrupt:
+        print("\nOprit de utilizator.")
