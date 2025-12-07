@@ -27,21 +27,23 @@ Acesta este un bot de scalping pentru **MetaTrader 5**, scris în Python, care i
 scalping-bot/
 │── bot_manager.py # orchestratorul botului
 │── config.yaml # fișierul de configurare
-│── utils.py # indicatori auxiliari (ex: ATR)
 │── README.md # acest fișier
 │
 ├── core/
-│ └── mt5_connector.py # singura interfață cu MetaTrader 5
+│ ├── mt5_connector.py # singura interfață cu MetaTrader 5
+│ ├── backtest_broker.py
+│ ├── broker_context.py
+│ └── logger.py
 │
 ├── managers/
 │ ├── risk_manager.py # gestionează riscul și lot sizing-ul
 │ └── trade_manager.py # gestionează ordine și trailing stop
 │
-└── strategies/
-├── base_strategy.py
-├── pivot_strategy.py
-└── ma_ribbon_strategy.py
-
+├── strategies/
+│ ├── base_strategy.py
+│ ├── bb_scalper.py
+│ └── ema_rsi_scalper.py
+└──
 ---
 
 ## ⚙️ Instalare
