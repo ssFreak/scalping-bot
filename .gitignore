@@ -3,3 +3,7 @@ core\__pycache__
 strategies\__pycache__
 bot.log/
 data/
+optimizers/*.csv
+optimizers/*.txt
+optimizers/*.db
+validators/*.txt

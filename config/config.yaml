@@ -9,8 +9,8 @@ general:
   daily_profit: 500.0
   daily_loss: -200.0
   max_drawdown: 0.30
-  risk_per_trade: 0.015
-  max_position_lot: 2.5
+  risk_per_trade: 0.006
+  max_position_lot: 5.0
   min_free_margin_ratio: 0.6
   session_hours: []
   deviation: 10
@@ -27,7 +27,7 @@ strategies:
   # --- A. TREND SCALPER (M5/H1) ---
   ema_rsi_scalper:
     enabled: true
-    magic_number_base: 19133000
+    magic_number_base: 19305120
     timeframe: "M5"
     timeframe_trend: "H1"
     ema_period: 50
@@ -36,30 +36,44 @@ strategies:
     ema_distance_pips: 8.0 
 
     symbol_settings:
-      GBPJPY: {enabled: true, magic_number_offset: 11, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 10.0, profit_lock_percent: 0.9}
-      USDJPY: {enabled: true, magic_number_offset: 5, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 25, rsi_overbought: 80, ema_distance_pips: 11.0, profit_lock_percent: 0.85}
-      GBPUSD: {enabled: true, magic_number_offset: 2, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 6.0, profit_lock_percent: 0.8}
-      EURJPY: {enabled: true, magic_number_offset: 9, rr_target: 1.0, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 75, ema_distance_pips: 9.0, profit_lock_percent: 0.75}
-      AUDJPY: {enabled: true, magic_number_offset: 8, rr_target: 1.1, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 9.0, profit_lock_percent: 0.9}
-      EURUSD: {enabled: true, magic_number_offset: 1, rr_target: 1.1, sl_atr_multiplier: 1.0, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 8.0, profit_lock_percent: 0.9}
+      GBPJPY: {enabled: true, magic_number_offset: 1, rr_target: 2.9, sl_atr_multiplier: 1.6, rsi_oversold: 20, rsi_overbought: 80, ema_distance_pips: 4, profit_lock_percent: 0.9}
 
-  # --- B. SPIKE HUNTER (M5) ---
+  # === STRATEGIA B: BB DYNAMIC (Optimized) ===
+  # Include parametrii specifici: Perioadă scurtă pe JPY, lungă pe Cross-uri
   bb_range_scalper:
     enabled: true
-    magic_number_base: 20000000
+    magic_number_base: 29305120
     timeframe: "M5"
-    bb_period: 15
-    bb_dev: 3.4
+    bb_period: 20
+    bb_dev: 2.0
     adx_period: 14
     adx_max: 30.0
     
     symbol_settings:
-      # Elita optimizată pentru Spike-uri
-      AUDNZD: {enabled: true, magic_number_offset: 13, bb_period: 15, bb_dev: 3.2, adx_max: 40.0}
-      AUDUSD: {enabled: true, magic_number_offset: 6, bb_period: 15, bb_dev: 3.5, adx_max: 40.0}
-      GBPJPY: {enabled: true, magic_number_offset: 11, bb_period: 15, bb_dev: 3.4, adx_max: 20.0}
-      EURJPY: {enabled: true, magic_number_offset: 9, bb_period: 15, bb_dev: 3.5, adx_max: 40.0}
-      AUDJPY: {enabled: true, magic_number_offset: 8, bb_period: 15, bb_dev: 3.4, adx_max: 25.0}
-      GBPUSD: {enabled: true, magic_number_offset: 2, bb_period: 15, bb_dev: 3.4, adx_max: 30.0}
-      USDJPY: {enabled: true, magic_number_offset: 5, bb_period: 15, bb_dev: 3.4, adx_max: 30.0}
-      EURCHF: {enabled: true, magic_number_offset: 12, bb_period: 15, bb_dev: 3.5, adx_max: 25.0}
+      # Vitezomani (Perioade scurte, Volatilitate mare)
+      GBPJPY: {enabled: true, magic_number_offset: 1, bb_period: 10, bb_dev: 2.3, adx_max: 50.0}
+      EURJPY: {enabled: true, magic_number_offset: 2, bb_period: 10, bb_dev: 3.2, adx_max: 45.0}
+      GBPUSD: {enabled: true, magic_number_offset: 3, bb_period: 10, bb_dev: 3.5, adx_max: 50.0}
+      AUDJPY: {enabled: true, magic_number_offset: 4, bb_period: 16, bb_dev: 3.4, adx_max: 45.0}
+      # Strategici (Perioade lungi, Mean Reversion clasic)
+      AUDNZD: {enabled: true, magic_number_offset: 5, bb_period: 40, bb_dev: 3.5, adx_max: 50.0}
+      AUDCAD: {enabled: true, magic_number_offset: 6, bb_period: 40, bb_dev: 3.3, adx_max: 50.0}
+
+  # === STRATEGIA C: ASIAN BREAKOUT ===
+  asian_breakout:
+    enabled: true
+    magic_number_base: 39305120
+    
+    # Parametri Default
+    timeframe: "M15"
+    range_start_hour: 1
+    range_end_hour: 8
+    breakout_buffer: 2.0
+    sl_pips: 20.0
+    tp_pips: 60.0
+    
+    symbol_settings:
+      GBPUSD: {enabled: true, magic_number_offset: 1, sl_pips: 25.0, tp_pips: 75.0}
+      GBPJPY: {enabled: true, magic_number_offset: 2, breakout_buffer: 3.0, sl_pips: 35.0, tp_pips: 100.0}
+      EURUSD: {enabled: true, magic_number_offset: 3, sl_pips: 15.0, tp_pips: 45.0}
+      USDJPY: {enabled: true, magic_number_offset: 4, sl_pips: 20.0, tp_pips: 60.0}

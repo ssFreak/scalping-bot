@@ -60,21 +60,33 @@ def load_and_prepare_data(file_path):
         print(f"EROARE la încărcarea {file_path}: {e}")
         return None
 
+# --- ÎNLOCUIEȘTE ACESTE DOUĂ FUNCȚII ÎN portofolio_validator_combined.py ---
+
 def preprocess_data_ema_rsi(data_paths, symbol, ema_period, atr_period, rsi_period):
     print(f"[INFO] Pre-procesare {symbol} (EMA Trend)...")
     df_m5 = load_and_prepare_data(data_paths['M5'])
     df_h1 = load_and_prepare_data(data_paths['H1'])
     if df_m5 is None or df_h1 is None: raise FileNotFoundError(f"Date M5/H1 lipsă {symbol}")
 
-    df_h1['H1_ema_trend'] = df_h1['close'].ewm(span=ema_period, adjust=False).mean()
+    # 1. Calculăm Indicatorii pe H1
+    h1_ema = df_h1['close'].ewm(span=ema_period, adjust=False).mean()
+    # Logica Trend: Close > EMA
+    # 🛑 FIX LOOKAHEAD H1: Shift(1) - Folosim trendul barei anterioare închise
+    df_h1['H1_trend_up'] = (df_h1['close'] > h1_ema).shift(1)
     
-    # FIX: Shift pentru a evita Lookahead Bias
-    df_h1['H1_trend_up'] = (df_h1['close'] > df_h1['H1_ema_trend']).shift(1)
+    # 2. Calculăm Indicatorii pe M5
+    m5_atr = EMARsiTrendScalper._calculate_atr(df_m5, atr_period, 'ema')
+    m5_rsi = EMARsiTrendScalper._calculate_rsi(df_m5, rsi_period)
+    
+    # 🛑 FIX LOOKAHEAD M5: Shift(1) 
+    # Decizia la timpul T se bazează pe RSI/ATR de la T-1 (bară închisă)
+    df_m5['M5_atr'] = m5_atr.shift(1)
+    df_m5['M5_rsi'] = m5_rsi.shift(1)
+    
+    # Curățăm primele rânduri care devin NaN după shift
     df_h1_to_merge = df_h1[['H1_trend_up']].dropna()
     
-    df_m5['M5_atr'] = EMARsiTrendScalper._calculate_atr(df_m5, atr_period, 'ema')
-    df_m5['M5_rsi'] = EMARsiTrendScalper._calculate_rsi(df_m5, rsi_period)
-    
+    # 3. Merge
     combined_df = pd.merge_asof(df_m5, df_h1_to_merge, left_index=True, right_index=True, direction='backward')
     combined_df.dropna(inplace=True)
     return combined_df
@@ -84,11 +96,21 @@ def preprocess_data_bb(data_paths, symbol, bb_period, bb_dev, adx_period):
     df_m5 = load_and_prepare_data(data_paths['M5'])
     if df_m5 is None: raise FileNotFoundError(f"Date M5 lipsă {symbol}")
 
-    df_m5['bb_sma'] = df_m5['close'].rolling(bb_period).mean()
+    # 1. Calculăm valorile brute
+    sma = df_m5['close'].rolling(bb_period).mean()
     std = df_m5['close'].rolling(bb_period).std()
-    df_m5['bb_upper'] = df_m5['bb_sma'] + (std * bb_dev)
-    df_m5['bb_lower'] = df_m5['bb_sma'] - (std * bb_dev)
-    df_m5['adx'] = calculate_adx_series(df_m5, adx_period)
+    upper = sma + (std * bb_dev)
+    lower = sma - (std * bb_dev)
+    adx = calculate_adx_series(df_m5, adx_period)
+    
+    # 🛑 FIX LOOKAHEAD BB: Shift(1)
+    # Nu putem ști că am atins banda superioară la Close decât DUPĂ ce s-a închis bara.
+    # Executăm la deschiderea următoare dacă bara anterioară a închis afară.
+    df_m5['bb_sma'] = sma.shift(1)
+    df_m5['bb_upper'] = upper.shift(1)
+    df_m5['bb_lower'] = lower.shift(1)
+    df_m5['adx'] = adx.shift(1)
+    
     df_m5.dropna(inplace=True)
     return df_m5
 
