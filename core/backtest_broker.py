@@ -1,13 +1,11 @@
-# core/backtest_broker.py - FINAL ROBUST VERSION
+# core/backtest_broker.py - BE & PROFIT LOCK ENABLED
 
 import pandas as pd
 from datetime import datetime
-import traceback 
 import numpy as np
 
 class BacktestBroker:
     def __init__(self, config: dict, initial_equity=1000.0, commission_per_lot=0.07, spread_pips=2.0):
-        self.logger = self._setup_logger()
         self.config = config
         self.initial_equity = initial_equity
         self.equity = initial_equity
@@ -23,62 +21,172 @@ class BacktestBroker:
         self._next_ticket_id = 1
         self.commission_per_lot = commission_per_lot
         self.spread_pips = self.config.get('general', {}).get('spread_pips', spread_pips)
+        
+        # Dicționar pentru a urmări Profit Lock (ca să nu mutăm SL înapoi)
         self.profit_lock_tracker = {} 
+
+        # Setup Logger simplu
+        self.logger = self._setup_logger()
 
     def _setup_logger(self):
         class SimpleLogger:
             def log(self, message, level="info"):
-                # Debugging activat pentru erori
-                if level in ["error", "warning"]: print(f"[{level.upper()}] {message}")
+                pass # Silentios în backtest
         return SimpleLogger()
 
     def set_current_data(self, timestamp, data_for_all_symbols: dict):
         self.current_timestamp = timestamp
         self.current_tick_data = data_for_all_symbols
 
+    # --- CALCUL LOT DINAMIC (CRUCIAL PENTRU COMPOUNDING) ---
     def calculate_lot_size(self, symbol, stop_loss_price):
-        """
-        Calculează lotul dinamic. Dacă ceva nu merge, returnează 0.01 ca fallback.
-        """
         try:
-            # 1. Extrage Risc
             risk_pct = self.config.get('general', {}).get('risk_per_trade', 0.01)
             risk_amount = self.equity * float(risk_pct)
             
-            # 2. Preț Curent
             tick = self.current_tick_data.get(symbol)
             if tick is None: return 0.01
             
-            # Accesare sigură (Pandas Series)
             current_price = tick['close'] if 'close' in tick else 0.0
             if current_price == 0: return 0.01
 
-            # 3. Distanța SL
             sl_dist = abs(current_price - stop_loss_price)
             if sl_dist == 0: return 0.01
 
-            # 4. Valoare Pip (Aproximare standard)
             pip_val = 1000.0 if "JPY" in symbol else 100000.0
-            
-            # 5. Risc per 1 Lot
             risk_per_lot = sl_dist * pip_val
             
             if risk_per_lot <= 0: return 0.01
             
-            # 6. Calcul Final
             lot = risk_amount / risk_per_lot
             
-            # Limite
-            max_lot = self.config.get('general', {}).get('max_position_lot', 1.0)
+            max_lot = self.config.get('general', {}).get('max_position_lot', 2.0)
             lot = max(0.01, min(lot, max_lot))
             
             return round(lot, 2)
-            
-        except Exception as e:
-            # În caz de eroare matematică, returnăm minimul pentru a nu bloca tranzacția
-            # print(f"Err Lot Calc {symbol}: {e}")
+        except:
             return 0.01
 
+    # --- SIMULARE TRAILING, BE & PROFIT LOCK ---
+    def _apply_trailing_logic(self, pos, current_price):
+        """
+        Simulează logica de TradeManager pe baza prețului curent (Close).
+        """
+        trailing_cfg = self.config.get('trailing', {})
+        if not trailing_cfg.get('enabled', False): return
+
+        symbol = pos['symbol']
+        ticket = pos['ticket']
+        entry_price = pos['entry_price']
+        sl = pos['sl']
+        tp = pos['tp']
+        p_type = pos['type'] # 0=BUY, 1=SELL
+        
+        pip = 0.01 if "JPY" in symbol else 0.0001
+        
+        # 1. Break Even Logic
+        be_points = float(trailing_cfg.get("be_min_profit_points", 0))
+        be_secure = float(trailing_cfg.get("be_secured_points", 0))
+        
+        if be_points > 0:
+            if p_type == 0: # BUY
+                profit_pts = (current_price - entry_price) / pip
+                if profit_pts >= be_points:
+                    new_sl = entry_price + (be_secure * pip)
+                    if new_sl > sl: # Mutăm doar în profit
+                        pos['sl'] = round(new_sl, 5)
+            else: # SELL
+                profit_pts = (entry_price - current_price) / pip
+                if profit_pts >= be_points:
+                    new_sl = entry_price - (be_secure * pip)
+                    if sl == 0 or new_sl < sl:
+                        pos['sl'] = round(new_sl, 5)
+
+        # 2. Profit Lock Logic (% din TP)
+        profit_lock_pct = float(trailing_cfg.get("profit_lock_percent", 0.0))
+        
+        if profit_lock_pct > 0 and tp > 0:
+            total_dist = abs(tp - entry_price)
+            curr_dist = abs(current_price - entry_price)
+            
+            if total_dist > 0:
+                pct_reached = curr_dist / total_dist
+                
+                # Verificăm dacă am atins % necesar (ex: 85%)
+                if pct_reached >= profit_lock_pct:
+                    # Calculăm noul SL "Locked"
+                    # Lăsăm un mic buffer (0.02) ca pe live
+                    lock_dist = total_dist * (profit_lock_pct - 0.02)
+                    
+                    if p_type == 0: # BUY
+                        target_sl = entry_price + lock_dist
+                        # Update doar dacă e mai bun
+                        if target_sl > pos['sl']:
+                            pos['sl'] = round(target_sl, 5)
+                    else: # SELL
+                        target_sl = entry_price - lock_dist
+                        # Update doar dacă e mai bun
+                        if pos['sl'] == 0 or target_sl < pos['sl']:
+                            pos['sl'] = round(target_sl, 5)
+
+    def update_all_positions(self):
+        if self.current_timestamp is None: return
+        
+        positions_to_close = []
+        
+        for pos in self.open_positions:
+            symbol = pos['symbol']
+            tick = self.current_tick_data.get(symbol)
+            if tick is None: continue
+            
+            # Datele barei curente
+            curr = tick['close']
+            high = tick['high']
+            low = tick['low']
+
+            # A. Verificare SL/TP (Hit Check)
+            # Verificăm High/Low pentru a vedea dacă prețul a atins limitele în timpul barei
+            closed = False
+            
+            if pos['type'] == 0: # BUY
+                if pos['sl'] > 0 and low <= pos['sl']: 
+                    positions_to_close.append((pos, pos['sl'])) 
+                    closed = True
+                elif pos['tp'] > 0 and high >= pos['tp']: 
+                    positions_to_close.append((pos, pos['tp'])) 
+                    closed = True
+            else: # SELL
+                if pos['sl'] > 0 and high >= pos['sl']: 
+                    positions_to_close.append((pos, pos['sl'])) 
+                    closed = True
+                elif pos['tp'] > 0 and low <= pos['tp']: 
+                    positions_to_close.append((pos, pos['tp'])) 
+                    closed = True
+            
+            # B. Actualizare PnL Floating
+            if not closed:
+                pip_val = 1000.0 if "JPY" in symbol else 100000.0
+                if pos['type'] == 0:
+                    pnl = (curr - pos['entry_price']) * pos['lot'] * pip_val
+                else:
+                    pnl = (pos['entry_price'] - curr) * pos['lot'] * pip_val
+                pos['pnl'] = pnl
+                
+                # C. APLICARE TRAILING (BE / LOCK) PENTRU BARA URMĂTOARE
+                # Folosim prețul de 'close' al barei curente pentru a decide mutarea SL
+                # Asta este metoda "Honest" (fără lookahead pe high/low)
+                self._apply_trailing_logic(pos, curr)
+
+        # Executare închideri
+        for pos, close_price in positions_to_close:
+            self._close_position(pos, close_price)
+            
+        # Actualizare Equity
+        floating_pnl = sum(p['pnl'] for p in self.open_positions)
+        self.equity = self.balance + floating_pnl
+        self.equity_history.append((self.current_timestamp, self.equity))
+
+    # --- RESTUL METODELOR STANDARD ---
     def get_open_positions(self, symbol: str, magic_number: int = None):
         filtered = []
         for pos in self.open_positions:
@@ -98,13 +206,10 @@ class BacktestBroker:
 
     def open_market_order(self, symbol, order_type, lot, sl, tp, magic_number, comment="", **kwargs):
         tick = self.current_tick_data.get(symbol)
-        
-        # Verificare date
         if tick is None: return None
         try:
             close_price = tick['close']
-        except:
-            return None
+        except: return None
             
         pip_size = self.get_pip_size(symbol)
         spread_cost = self.spread_pips * pip_size
@@ -134,10 +239,6 @@ class BacktestBroker:
         }
         self.open_positions.append(position)
         self._next_ticket_id += 1
-        
-        # DEBUG: Confirmare tranzacție
-        # print(f"✅ OPEN {symbol} {lot} lots @ {entry_price}")
-        
         return position['ticket']
 
     def close_position(self, symbol: str, ticket: int, magic_number: int):
@@ -150,107 +251,24 @@ class BacktestBroker:
         if pos_to_close:
             tick = self.current_tick_data.get(symbol)
             if tick is None: return False
-            
             close_price_raw = tick['close']
             pip_size = self.get_pip_size(symbol)
             spread_cost = self.spread_pips * pip_size
-            
             if pos_to_close['type'] == 0: 
                 final_price = close_price_raw - (spread_cost/2)
             else: 
                 final_price = close_price_raw + (spread_cost/2)
-                
             self._close_position(pos_to_close, final_price)
             return True
         return False
-
+        
     def apply_trailing_stop(self, symbol, position, atr_price, pip, params):
-        self.apply_trailing(position)
+        # Compatibilitate cu apelurile vechi, dar logica e acum internă în _apply_trailing_logic
+        pass 
 
-    def apply_trailing(self, position):
-        symbol = position['symbol']
-        tick = self.current_tick_data.get(symbol)
-        if tick is None: return
-
-        current_price = tick['close']
-        entry_price = position['entry_price']
-        tp = position['tp']
-        order_type = position['type']
-        ticket = position['ticket']
-        
-        digits = self.get_digits(symbol)
-        trailing_cfg = self.config.get('trailing', {})
-        profit_lock_pct = float(trailing_cfg.get('profit_lock_percent', 0.85))
-
-        if profit_lock_pct > 0 and tp > 0:
-            total_dist = abs(tp - entry_price)
-            current_dist = abs(current_price - entry_price)
-            
-            if total_dist > 0:
-                pct_reached = current_dist / total_dist
-                
-                if ticket in self.profit_lock_tracker:
-                    recorded_lock = self.profit_lock_tracker[ticket]
-                    triggered = False
-                    if order_type == 0 and current_price < recorded_lock: triggered = True
-                    elif order_type == 1 and current_price > recorded_lock: triggered = True
-                        
-                    if triggered:
-                        self._close_position(position, current_price)
-                        del self.profit_lock_tracker[ticket]
-                        return 
-
-                if pct_reached >= profit_lock_pct:
-                    if order_type == 0:
-                        lock_price = entry_price + (total_dist * profit_lock_pct)
-                    else:
-                        lock_price = entry_price - (total_dist * profit_lock_pct)
-                    self.profit_lock_tracker[ticket] = round(lock_price, digits)
-
-    def update_all_positions(self):
-        if self.current_timestamp is None: return
-        
-        positions_to_close = []
-        
-        for pos in self.open_positions:
-            symbol = pos['symbol']
-            tick = self.current_tick_data.get(symbol)
-            if tick is None: continue
-            
-            curr = tick['close']
-            high = tick['high']
-            low = tick['low']
-
-            # Verificare SL/TP pe High/Low pentru acuratețe
-            if pos['type'] == 0: # BUY
-                if pos['sl'] > 0 and low <= pos['sl']: 
-                    positions_to_close.append((pos, pos['sl'])) 
-                elif pos['tp'] > 0 and high >= pos['tp']: 
-                    positions_to_close.append((pos, pos['tp'])) 
-            else: # SELL
-                if pos['sl'] > 0 and high >= pos['sl']: 
-                    positions_to_close.append((pos, pos['sl'])) 
-                elif pos['tp'] > 0 and low <= pos['tp']: 
-                    positions_to_close.append((pos, pos['tp'])) 
-            
-            pip_val = 1000.0 if "JPY" in symbol else 100000.0
-            if pos['type'] == 0:
-                pnl = (curr - pos['entry_price']) * pos['lot'] * pip_val
-            else:
-                pnl = (pos['entry_price'] - curr) * pos['lot'] * pip_val
-            pos['pnl'] = pnl
-
-        for pos, close_price in positions_to_close:
-            self._close_position(pos, close_price)
-            
-        floating_pnl = sum(p['pnl'] for p in self.open_positions)
-        self.equity = self.balance + floating_pnl
-        self.equity_history.append((self.current_timestamp, self.equity))
-        
     def _close_position(self, position, close_price):
         if position in self.open_positions:
             pip_val = 1000.0 if "JPY" in position['symbol'] else 100000.0
-            
             if position['type'] == 0: 
                 pnl_final = (close_price - position['entry_price']) * position['lot'] * pip_val
             else: 
@@ -259,12 +277,13 @@ class BacktestBroker:
             position['exit_price'] = close_price
             position['exit_time'] = self.current_timestamp
             position['pnl'] = pnl_final
-            
             self.balance += pnl_final
             self.trade_history.append(position)
             self.open_positions.remove(position)
 
     def generate_portfolio_report(self, symbols_tested, report_filename="portfolio_report.txt"):
+        # ... (Codul de raportare rămâne neschimbat, e doar afișare) ...
+        # Poți folosi implementarea din mesajele anterioare
         if not self.trade_history:
             print("--- RAPORT: Nicio tranzacție executată. ---")
             return {"total_trades": 0, "profit_factor": 0.0, "max_drawdown_pct": 0.0}

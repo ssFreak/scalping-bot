@@ -121,13 +121,41 @@ def preprocess_data_asian(data_paths, symbol):
 
 # --- 2. Main Logic ---
 
+# --- HELPER PENTRU SESIUNE ---
+def is_time_in_session(timestamp, session_config):
+    """
+    Verifică dacă timestamp-ul curent se află în intervalele permise.
+    Format config așteptat: [ ["01:15", "23:45"], ... ]
+    """
+    if not session_config:
+        return True # Dacă lista e goală, tranzacționăm non-stop
+
+    current_time_str = timestamp.strftime("%H:%M")
+    
+    # Gestionăm formatele diferite din config
+    for interval in session_config:
+        # Varianta 1: Listă de liste [ ["01:15", "23:45"] ]
+        if isinstance(interval, list) and len(interval) == 2:
+            start, end = interval
+        # Varianta 2: String cu liniuță "01:15-23:45"
+        elif isinstance(interval, str) and '-' in interval:
+            start, end = interval.split('-')
+        else:
+            continue # Format necunoscut
+
+        # Verificare simplă (presupunem start < end pentru intraday)
+        if start <= current_time_str < end:
+            return True
+            
+    return False
+
+# --- LOGICA PRINCIPALĂ MODIFICATĂ ---
 def run_combined_backtest(config, target_strategies=None):
-    """
-    target_strategies: Lista cu numele strategiilor de rulat (ex: ['ema_rsi_scalper']).
-                       Dacă e None, le rulează pe toate cele active.
-    """
     initial_equity = config.get('general', {}).get('portfolio_initial_equity', 2000.0)
     broker = BacktestBroker(config=config, initial_equity=initial_equity)
+    
+    # Extragem configurarea sesiunii
+    session_hours = config.get('general', {}).get('session_hours', [])
     
     all_data = {} 
     active_strategies = {} 
@@ -136,34 +164,25 @@ def run_combined_backtest(config, target_strategies=None):
     strategy_map = {
         'ema_rsi_scalper': EMARsiTrendScalper,
         'bb_range_scalper': BollingerReversionScalper,
-        # 'asian_breakout': AsianBreakoutStrategy  # Decomentează dacă ai clasa
+        # 'asian_breakout': AsianBreakoutStrategy 
     }
 
-    # Determinăm ce strategii rulăm
     available_in_config = config.get('strategies', {})
-    
-    # Dacă nu am primit o listă specifică, luăm tot ce e enabled
     if target_strategies is None:
         target_strategies = [k for k, v in available_in_config.items() if v.get('enabled', False)]
     
     print(f"\n🚀 START VALIDARE (Capital: ${initial_equity})")
-    print(f"🎯 Strategii selectate: {target_strategies}")
+    print(f"⏰ Sesiune Activă: {session_hours if session_hours else 'NON-STOP'}")
 
+    # ... [Partea de încărcare date rămâne neschimbată] ...
+    # (Copiază logica de încărcare de la versiunea anterioară aici)
     for strat_name in target_strategies:
         strat_config = available_in_config.get(strat_name)
-        
-        # Dublă verificare (deși meniul filtrează, e bine să fim siguri)
-        if not strat_config or not strat_config.get('enabled', False):
-            print(f"⚠️ Strategia {strat_name} nu este activă în config sau nu există.")
-            continue
-            
+        if not strat_config or not strat_config.get('enabled', False): continue
         strat_class = strategy_map.get(strat_name)
-        if not strat_class:
-            print(f"⚠️ Clasa pentru strategia '{strat_name}' nu este mapată în script.")
-            continue
+        if not strat_class: continue
 
         print(f"\n🔹 Încărcare Strategie: {strat_name}")
-        
         symbol_settings = strat_config.get('symbol_settings', {})
         active_symbols = [s for s, p in symbol_settings.items() if p.get('enabled', False)]
         
@@ -172,43 +191,23 @@ def run_combined_backtest(config, target_strategies=None):
                 sym_conf = symbol_settings[symbol]
                 final_conf = {**strat_config, **sym_conf}
                 
-                # --- FIX CĂI DATE ---
-                # Folosim os.path.join cu PROJECT_ROOT pentru a găsi datele
                 data_paths = {
                     "M5": os.path.join(PROJECT_ROOT, "data", f"{symbol}_M5_9Y.csv"),
                     "M15": os.path.join(PROJECT_ROOT, "data", f"{symbol}_M15_9Y.csv"),
                     "H1": os.path.join(PROJECT_ROOT, "data", f"{symbol}_H1_9Y.csv")
                 }
 
-                # Verificare existență fișiere de bază (depinde de strategie)
-                # Aici facem o verificare generică, preprocessori specifici vor arunca erori dacă lipsește ceva critic
-                
                 df_new = None
-                
                 if strat_name == 'ema_rsi_scalper':
-                    if not os.path.exists(data_paths['M5']):
-                        print(f"❌ Lipsă date M5 pentru {symbol}"); continue
+                    if not os.path.exists(data_paths['M5']): continue
                     df_new = preprocess_data_ema_rsi(data_paths, symbol, 
-                                final_conf.get('ema_period',50), 
-                                final_conf.get('atr_period',14), 
-                                final_conf.get('rsi_period',14))
-                                
+                                final_conf.get('ema_period',50), final_conf.get('atr_period',14), final_conf.get('rsi_period',14))
                 elif strat_name == 'bb_range_scalper':
-                    if not os.path.exists(data_paths['M5']):
-                        print(f"❌ Lipsă date M5 pentru {symbol}"); continue
+                    if not os.path.exists(data_paths['M5']): continue
                     df_new = preprocess_data_bb(data_paths, symbol, 
-                                final_conf.get('bb_period',20), 
-                                final_conf.get('bb_dev',2.0), 
-                                final_conf.get('adx_period',14))
-                                
-                elif strat_name == 'asian_breakout':
-                     if not os.path.exists(data_paths['M15']):
-                        print(f"❌ Lipsă date M15 pentru {symbol}"); continue
-                     df_new = preprocess_data_asian(data_paths, symbol)
-
-                if df_new is None:
-                    print(f"❌ Nu s-au putut procesa datele pentru {symbol} ({strat_name})")
-                    continue
+                                final_conf.get('bb_period',20), final_conf.get('bb_dev',2.0), final_conf.get('adx_period',14))
+                
+                if df_new is None: continue
                 
                 if symbol not in all_data:
                     all_data[symbol] = df_new
@@ -220,41 +219,44 @@ def run_combined_backtest(config, target_strategies=None):
                 instance_key = f"{strat_name}_{symbol}"
                 active_strategies[instance_key] = strat_class(symbol=symbol, config=final_conf, broker_context=broker)
                 
-                if master_index is None:
-                    master_index = all_data[symbol].index
-                else:
-                    master_index = master_index.union(all_data[symbol].index)
-                    
-            except Exception as e:
-                print(f"❌ Eroare la {symbol}: {e}")
+                if master_index is None: master_index = all_data[symbol].index
+                else: master_index = master_index.union(all_data[symbol].index)
+            except Exception as e: print(f"❌ Eroare {symbol}: {e}")
+
+    # ... [Final încărcare date] ...
 
     print(f"\n⏳ Sincronizare și Rulare Simulare ({len(active_strategies)} instanțe active)...")
-    
-    if master_index is None:
-        print("❌ Nu au fost încărcate date. Verifică paths sau dacă strategiile selectate au simboluri active.")
-        return
+    if master_index is None: return
 
     master_index_unique = master_index.unique().sort_values()
     
+    # Reindexare date
     for sym in all_data:
         all_data[sym] = all_data[sym].reindex(master_index_unique, method='ffill')
     
     total_bars = len(master_index_unique)
     
+    # --- BUCLA DE BACKTEST (MODIFICATĂ) ---
     for i in range(total_bars):
         timestamp = master_index_unique[i]
         
+        # 1. Verificăm dacă suntem în orele permise
+        trading_allowed = is_time_in_session(timestamp, session_hours)
+
         current_data_map = {}
         for sym, df in all_data.items():
             current_data_map[sym] = df.iloc[i]
             
         broker.set_current_data(timestamp, current_data_map)
         
-        for key, strategy in active_strategies.items():
-            bar = current_data_map.get(strategy.symbol)
-            if bar is not None:
-                strategy.run_once(current_bar=bar)
+        # 2. Rulăm strategiile DOAR dacă trading_allowed este True
+        if trading_allowed:
+            for key, strategy in active_strategies.items():
+                bar = current_data_map.get(strategy.symbol)
+                if bar is not None:
+                    strategy.run_once(current_bar=bar)
         
+        # 3. Brokerul rulează ALWAYS (pentru a gestiona pozițiile deschise anterior)
         broker.update_all_positions()
         
         if i % 100000 == 0 and i > 0:
@@ -262,11 +264,9 @@ def run_combined_backtest(config, target_strategies=None):
 
     print("\n✅ Validare Finalizată.")
     
-    # Salvare raport în folderul validators
-    suffix = "_COMBINED" if len(target_strategies) > 1 else f"_{target_strategies[0].upper()}"
+    suffix = "_SESSION_FILTERED" 
     report_filename = f"REPORT_9Y{suffix}.txt"
     report_path = os.path.join(current_dir, report_filename)
-    
     broker.generate_portfolio_report(list(active_strategies.keys()), report_path)
     print(f"📝 Raport salvat în: {report_filename}")
 

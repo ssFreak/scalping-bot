@@ -12,7 +12,7 @@ general:
   risk_per_trade: 0.006
   max_position_lot: 5.0
   min_free_margin_ratio: 0.6
-  session_hours: []
+  session_hours: [ ["01:15", "23:45"] ]
   deviation: 10
   can_trade_log_period_sec: 3600
 
